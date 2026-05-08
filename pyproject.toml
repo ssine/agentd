@@ -5,6 +5,7 @@ requires-python = ">=3.10"
 dependencies = [
     "lark-oapi>=1.6.0",
     "tomli>=2.2.1; python_version < '3.11'",
+    "zstandard>=0.23.0",
 ]
 
 [dependency-groups]

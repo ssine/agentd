@@ -162,6 +162,9 @@ def config_check(config: AgentdConfig) -> int:
     print(f'codex_command={config.codex.command}')
     print(f'codex_capture_enabled={config.codex.capture.enabled}')
     print(f'codex_capture_dir={config.codex.capture.capture_dir}')
+    print(f'codex_capture_archive_period={config.codex.capture.archive_period}')
+    print(f'codex_capture_archive_format={config.codex.capture.archive_format}')
+    print(f'codex_capture_zstd_level={config.codex.capture.zstd_level}')
     print(f'codex_capture_upstream_mode={config.codex.capture.upstream_mode}')
     if config.codex.capture.upstream_url:
         print(f'codex_capture_upstream_url={config.codex.capture.upstream_url}')

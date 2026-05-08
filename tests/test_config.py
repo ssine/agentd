@@ -130,6 +130,9 @@ class ConfigTest(unittest.TestCase):
                         'upstream_mode = "chatgpt"',
                         'upstream_url = "https://example.test/responses"',
                         'save_sensitive_headers = true',
+                        'archive_period = "month"',
+                        'archive_format = "tar.zst"',
+                        'zstd_level = 12',
                         '',
                     ]
                 ),
@@ -145,6 +148,9 @@ class ConfigTest(unittest.TestCase):
             self.assertEqual(config.codex.capture.capture_dir, home / 'state' / 'captures')
             self.assertEqual(config.codex.capture.db_path, home / 'state' / 'agentd.sqlite')
             self.assertTrue(config.codex.capture.save_sensitive_headers)
+            self.assertEqual(config.codex.capture.archive_period, 'month')
+            self.assertEqual(config.codex.capture.archive_format, 'tar.zst')
+            self.assertEqual(config.codex.capture.zstd_level, 12)
 
 
 if __name__ == '__main__':

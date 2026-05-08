@@ -60,7 +60,7 @@ Agentd-owned runtime state is stored under the configured `state_dir`:
 - `agentd.pid`: pid for the fallback process supervisor.
 - `logs/`: per-turn Codex app-server JSON-RPC logs.
 - `logs/agentd-service.log`: stdout/stderr for the fallback process supervisor.
-- `captures/responses/`: raw Responses API captures when `codex.capture.enabled = true`.
+- `captures/responses/`: raw Responses API captures when `codex.capture.enabled = true`; the current archive period stays as loose `.http` files and completed periods are compacted into `.tar.zst`.
 
 Optional Codex Responses capture:
 
@@ -68,9 +68,12 @@ Optional Codex Responses capture:
 [codex.capture]
 enabled = true
 upstream_mode = "codex-default"
+archive_period = "week" # day, week, or month
+archive_format = "tar.zst"
+zstd_level = 10
 ```
 
-When enabled, `agentd` injects a temporary local model provider for the Codex app-server process and records final `POST /v1/responses` request/response exchanges under `state_dir`. The proxy only handles the model provider endpoint; it does not change `chatgpt_base_url` or set global proxy environment variables.
+When enabled, `agentd` injects a temporary local model provider for the Codex app-server process and records final `POST /v1/responses` request/response exchanges under `state_dir`. Each live exchange is stored as one request `.http` and one response `.http` file under the current period directory, which defaults to the current ISO week. On startup and new captures, older period directories are archived as a single `tar.zst` while the SQLite index keeps the exchange metadata and archive member names. The proxy only handles the model provider endpoint; it does not change `chatgpt_base_url` or set global proxy environment variables.
 
 ## Context
 

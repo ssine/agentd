@@ -36,6 +36,9 @@ class CodexCaptureConfig:
     capture_dir: Path = Path()
     db_path: Path = Path()
     save_sensitive_headers: bool = False
+    archive_period: str = 'week'
+    archive_format: str = 'tar.zst'
+    zstd_level: int = 10
 
 
 @dataclass(frozen=True)
@@ -117,6 +120,33 @@ def _env_first(*names: str) -> str:
         if value:
             return value
     return ''
+
+
+def _capture_archive_period(value: Any) -> str:
+    raw = str(value or 'week').strip().lower()
+    aliases = {
+        'daily': 'day',
+        'weekly': 'week',
+        'monthly': 'month',
+    }
+    period = aliases.get(raw, raw)
+    if period not in {'day', 'week', 'month'}:
+        raise ValueError('codex.capture.archive_period must be day, week, or month')
+    return period
+
+
+def _capture_archive_format(value: Any) -> str:
+    archive_format = str(value or 'tar.zst').strip().lower()
+    if archive_format != 'tar.zst':
+        raise ValueError('codex.capture.archive_format currently supports only tar.zst')
+    return archive_format
+
+
+def _zstd_level(value: Any) -> int:
+    level = int(value or 10)
+    if level < 1 or level > 22:
+        raise ValueError('codex.capture.zstd_level must be between 1 and 22')
+    return level
 
 
 def _command(value: Any, base: Path) -> str:
@@ -214,6 +244,9 @@ def load_config(path: str | Path | None = None) -> AgentdConfig:
             capture_dir=capture_dir,
             db_path=capture_db_path,
             save_sensitive_headers=bool(codex_capture_raw.get('save_sensitive_headers', False)),
+            archive_period=_capture_archive_period(codex_capture_raw.get('archive_period')),
+            archive_format=_capture_archive_format(codex_capture_raw.get('archive_format')),
+            zstd_level=_zstd_level(codex_capture_raw.get('zstd_level')),
         ),
     )
 

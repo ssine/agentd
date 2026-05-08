@@ -42,3 +42,6 @@ enabled = false
 upstream_mode = "codex-default" # codex-default, chatgpt, or api
 upstream_url = "" # Optional explicit full upstream /responses URL.
 save_sensitive_headers = false
+archive_period = "week" # day, week, or month
+archive_format = "tar.zst"
+zstd_level = 10

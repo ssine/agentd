@@ -4,7 +4,7 @@ import sqlite3
 import time
 from pathlib import Path
 
-from .capture_proxy import MODEL_HTTP_EXCHANGES_SCHEMA
+from .capture_proxy import ensure_model_http_exchanges_schema
 from .context import split_skill_names
 from .models import AgentSession, SpawnRequest, TitleRequest
 
@@ -82,7 +82,7 @@ class Registry:
                 );
                 """
             )
-            conn.execute(MODEL_HTTP_EXCHANGES_SCHEMA)
+            ensure_model_http_exchanges_schema(conn)
             self._add_column_if_missing(conn, 'sessions', 'root_message_id', 'text')
             self._add_column_if_missing(conn, 'sessions', 'context_profile', "text not null default ''")
             self._add_column_if_missing(conn, 'sessions', 'skills', "text not null default ''")

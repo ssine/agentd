@@ -141,6 +141,9 @@ class CodexAppServer:
                 upstream_url=self.config.capture.upstream_url,
                 context=CaptureContext(session_id=session.id, provider_id=CAPTURE_PROVIDER_ID, model=self.config.model),
                 save_sensitive_headers=self.config.capture.save_sensitive_headers,
+                archive_period=self.config.capture.archive_period,
+                archive_format=self.config.capture.archive_format,
+                zstd_level=self.config.capture.zstd_level,
             )
             capture_proxy.start()
             active_overrides.extend(capture_provider_overrides(capture_proxy.base_url))

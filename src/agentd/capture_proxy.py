@@ -5,7 +5,10 @@ import gzip
 import http.client
 import json
 import os
+import re
+import shutil
 import sqlite3
+import tarfile
 import threading
 import time
 import uuid
@@ -39,6 +42,7 @@ HOP_BY_HOP_HEADERS = {
     'transfer-encoding',
     'upgrade',
 }
+CAPTURE_PERIOD_RE = re.compile(r'^\d{4}-(?:\d{2}-\d{2}|W\d{2}|\d{2})$')
 
 
 @dataclass
@@ -52,11 +56,11 @@ class CaptureContext:
 
 @dataclass(frozen=True)
 class CapturePaths:
-    request_headers_path: Path
-    request_body_raw_path: Path
-    request_body_decoded_path: Path | None
-    response_headers_path: Path
-    response_body_raw_path: Path
+    period_key: str
+    period_dir: Path
+    inprogress_path: Path
+    request_capture_path: Path
+    response_capture_path: Path
 
 
 class CaptureStore:
@@ -68,7 +72,7 @@ class CaptureStore:
 
     def _init(self) -> None:
         with closing(self._connect()) as conn:
-            conn.execute(MODEL_HTTP_EXCHANGES_SCHEMA)
+            ensure_model_http_exchanges_schema(conn)
             conn.commit()
 
     def _connect(self) -> sqlite3.Connection:
@@ -97,6 +101,14 @@ class CaptureStore:
                     request_body_decoded_path,
                     response_headers_path,
                     response_body_raw_path,
+                    storage_state,
+                    period_key,
+                    request_capture_path,
+                    response_capture_path,
+                    archive_path,
+                    archive_member_request,
+                    archive_member_response,
+                    archive_format,
                     error
                 )
                 values(
@@ -118,6 +130,14 @@ class CaptureStore:
                     :request_body_decoded_path,
                     :response_headers_path,
                     :response_body_raw_path,
+                    :storage_state,
+                    :period_key,
+                    :request_capture_path,
+                    :response_capture_path,
+                    :archive_path,
+                    :archive_member_request,
+                    :archive_member_response,
+                    :archive_format,
                     :error
                 )
                 """,
@@ -134,6 +154,60 @@ class CaptureStore:
             conn.execute(f'update model_http_exchanges set {assignments} where id = ?', values)
             conn.commit()
 
+    def mark_period_archived(
+        self,
+        period_key: str,
+        archive_path: Path,
+        archive_format: str,
+        period_dir: Path,
+    ) -> None:
+        with self._lock, closing(self._connect()) as conn:
+            conn.row_factory = sqlite3.Row
+            legacy_path_prefix = f'{period_dir}{os.sep}%'
+            rows = conn.execute(
+                """
+                select id, request_capture_path, response_capture_path, request_body_raw_path, response_body_raw_path
+                from model_http_exchanges
+                where storage_state = 'live'
+                  and (
+                    period_key = ?
+                    or request_capture_path like ?
+                    or response_capture_path like ?
+                    or request_body_raw_path like ?
+                    or response_body_raw_path like ?
+                  )
+                """,
+                (period_key, legacy_path_prefix, legacy_path_prefix, legacy_path_prefix, legacy_path_prefix),
+            ).fetchall()
+            for row in rows:
+                request_path = (
+                    row['request_capture_path'] or row['request_body_raw_path'] or f'{row["id"]}-request.http'
+                )
+                response_path = (
+                    row['response_capture_path'] or row['response_body_raw_path'] or f'{row["id"]}-response.http'
+                )
+                conn.execute(
+                    """
+                    update model_http_exchanges
+                    set storage_state = 'archived',
+                        period_key = ?,
+                        archive_path = ?,
+                        archive_member_request = ?,
+                        archive_member_response = ?,
+                        archive_format = ?
+                    where id = ?
+                    """,
+                    (
+                        period_key,
+                        str(archive_path),
+                        Path(str(request_path)).name,
+                        Path(str(response_path)).name,
+                        archive_format,
+                        row['id'],
+                    ),
+                )
+            conn.commit()
+
 
 class CaptureProxy:
     def __init__(
@@ -145,6 +219,9 @@ class CaptureProxy:
         upstream_url: str = '',
         context: CaptureContext,
         save_sensitive_headers: bool = False,
+        archive_period: str = 'week',
+        archive_format: str = 'tar.zst',
+        zstd_level: int = 10,
     ) -> None:
         self.capture_dir = capture_dir
         self.db_path = db_path
@@ -152,8 +229,12 @@ class CaptureProxy:
         self.upstream_url = upstream_url
         self.context = context
         self.save_sensitive_headers = save_sensitive_headers
+        self.archive_period = normalize_archive_period(archive_period)
+        self.archive_format = normalize_archive_format(archive_format)
+        self.zstd_level = normalize_zstd_level(zstd_level)
         self.store = CaptureStore(db_path)
         self._context_lock = threading.Lock()
+        self._archive_lock = threading.Lock()
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
 
@@ -168,6 +249,7 @@ class CaptureProxy:
         self.capture_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         with suppress(OSError):
             os.chmod(self.capture_dir, 0o700)
+        self.archive_finished_periods()
 
         class Handler(CaptureProxyHandler):
             proxy = self
@@ -222,13 +304,53 @@ class CaptureProxy:
             return f'{CHATGPT_RESPONSES_URL}{suffix}'
         return f'{OPENAI_RESPONSES_URL}{suffix}'
 
-    def exchange_dir(self) -> Path:
-        today = dt.datetime.now(dt.timezone.utc).strftime('%Y-%m-%d')
-        path = self.capture_dir / 'responses' / today
+    def exchange_dir(self) -> tuple[str, Path]:
+        self.archive_finished_periods()
+        period_key = capture_period_key(dt.datetime.now(dt.timezone.utc), self.archive_period)
+        path = self.capture_dir / 'responses' / period_key
         path.mkdir(mode=0o700, parents=True, exist_ok=True)
         with suppress(OSError):
             os.chmod(path, 0o700)
-        return path
+        return period_key, path
+
+    def archive_finished_periods(self, now: dt.datetime | None = None) -> None:
+        with self._archive_lock:
+            responses_root = self.capture_dir / 'responses'
+            responses_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+            with suppress(OSError):
+                os.chmod(responses_root, 0o700)
+
+            current_period = capture_period_key(now or dt.datetime.now(dt.timezone.utc), self.archive_period)
+            for period_dir in sorted(path for path in responses_root.iterdir() if path.is_dir()):
+                if period_dir.name == current_period or not is_capture_period_key(period_dir.name):
+                    continue
+                self._archive_period_dir(period_dir)
+
+    def _archive_period_dir(self, period_dir: Path) -> None:
+        if any(period_dir.glob('*.inprogress')):
+            return
+        files = [path for path in sorted(period_dir.iterdir()) if path.is_file() and not path.name.startswith('.')]
+        if not files:
+            shutil.rmtree(period_dir)
+            return
+
+        archive_path = period_dir.parent / f'{period_dir.name}.{self.archive_format}'
+        if not archive_path.exists():
+            tmp_path = period_dir.parent / f'.{archive_path.name}.{uuid.uuid4().hex}.tmp'
+            with suppress(FileNotFoundError):
+                tmp_path.unlink()
+            write_tar_zst_archive(period_dir, tmp_path, level=self.zstd_level)
+            os.replace(tmp_path, archive_path)
+            with suppress(OSError):
+                os.chmod(archive_path, 0o600)
+
+        archived_members = read_tar_zst_member_names(archive_path)
+        live_file_names = {path.name for path in files}
+        if not live_file_names.issubset(archived_members):
+            return
+
+        self.store.mark_period_archived(period_dir.name, archive_path, self.archive_format, period_dir)
+        shutil.rmtree(period_dir)
 
 
 class CaptureProxyHandler(BaseHTTPRequestHandler):
@@ -255,53 +377,68 @@ class CaptureProxyHandler(BaseHTTPRequestHandler):
         upstream_url = self.proxy.upstream_for_path(request_headers, request_path)
         paths = self._capture_paths(exchange_id)
 
-        decoded_body = decode_body(raw_body, header_value(request_headers, 'content-encoding'))
-        request_json = parse_json(decoded_body)
-        request_decoded_path = write_decoded_request(paths.request_body_decoded_path, request_json)
-        metadata = parse_metadata_header(header_value(request_headers, 'x-codex-turn-metadata'))
-        correlated = correlate(context, metadata)
-        model = model_from_request(request_json) or context.model
-        stream = stream_from_request(request_json)
-
-        write_json(paths.request_headers_path, redact_headers(request_headers, self.proxy.save_sensitive_headers))
-        paths.request_body_raw_path.write_bytes(raw_body)
-        self.proxy.store.insert_exchange(
-            {
-                'id': exchange_id,
-                'created_at': int(time.time()),
-                'completed_at': None,
-                'session_id': correlated.session_id,
-                'codex_thread_id': correlated.codex_thread_id,
-                'codex_turn_id': correlated.codex_turn_id,
-                'method': 'POST',
-                'request_path': request_path,
-                'upstream_url': upstream_url,
-                'provider_id': correlated.provider_id,
-                'model': model,
-                'stream': int(stream) if stream is not None else None,
-                'status_code': None,
-                'request_headers_path': str(paths.request_headers_path),
-                'request_body_raw_path': str(paths.request_body_raw_path),
-                'request_body_decoded_path': str(request_decoded_path) if request_decoded_path else None,
-                'response_headers_path': None,
-                'response_body_raw_path': str(paths.response_body_raw_path),
-                'error': None,
-            }
-        )
-
         try:
+            decoded_body = decode_body(raw_body, header_value(request_headers, 'content-encoding'))
+            request_json = parse_json(decoded_body)
+            metadata = parse_metadata_header(header_value(request_headers, 'x-codex-turn-metadata'))
+            correlated = correlate(context, metadata)
+            model = model_from_request(request_json) or context.model
+            stream = stream_from_request(request_json)
+
+            write_http_request(
+                paths.request_capture_path,
+                'POST',
+                request_path,
+                request_headers,
+                raw_body,
+                self.proxy.save_sensitive_headers,
+            )
+            self.proxy.store.insert_exchange(
+                {
+                    'id': exchange_id,
+                    'created_at': int(time.time()),
+                    'completed_at': None,
+                    'session_id': correlated.session_id,
+                    'codex_thread_id': correlated.codex_thread_id,
+                    'codex_turn_id': correlated.codex_turn_id,
+                    'method': 'POST',
+                    'request_path': request_path,
+                    'upstream_url': upstream_url,
+                    'provider_id': correlated.provider_id,
+                    'model': model,
+                    'stream': int(stream) if stream is not None else None,
+                    'status_code': None,
+                    'request_headers_path': str(paths.request_capture_path),
+                    'request_body_raw_path': str(paths.request_capture_path),
+                    'request_body_decoded_path': None,
+                    'response_headers_path': None,
+                    'response_body_raw_path': str(paths.response_capture_path),
+                    'storage_state': 'live',
+                    'period_key': paths.period_key,
+                    'request_capture_path': str(paths.request_capture_path),
+                    'response_capture_path': str(paths.response_capture_path),
+                    'archive_path': None,
+                    'archive_member_request': None,
+                    'archive_member_response': None,
+                    'archive_format': self.proxy.archive_format,
+                    'error': None,
+                }
+            )
             self._forward(exchange_id, upstream_url, request_headers, raw_body, paths)
         except Exception as exc:  # pragma: no cover - exercised by integration failures
             self.proxy.store.update_exchange(
                 exchange_id,
                 completed_at=int(time.time()),
                 error=str(exc),
-                response_body_raw_path=str(paths.response_body_raw_path),
+                response_body_raw_path=str(paths.response_capture_path),
             )
             if not getattr(self, '_agentd_response_started', False):
                 self.send_error(502, f'agentd capture proxy upstream error: {exc}')
             else:
                 self.close_connection = True
+        finally:
+            with suppress(FileNotFoundError):
+                paths.inprogress_path.unlink()
 
     def _forward(
         self,
@@ -318,13 +455,13 @@ class CaptureProxyHandler(BaseHTTPRequestHandler):
             headers = forward_request_headers(request_headers, parsed, len(raw_body))
             conn.request('POST', target, body=raw_body, headers=headers)
             response = conn.getresponse()
-            response_headers = response_headers_to_dict(response.getheaders())
-            write_json(paths.response_headers_path, response_headers)
+            response_headers = response.getheaders()
             self.proxy.store.update_exchange(
                 exchange_id,
                 status_code=response.status,
-                response_headers_path=str(paths.response_headers_path),
-                response_body_raw_path=str(paths.response_body_raw_path),
+                response_headers_path=str(paths.response_capture_path),
+                response_body_raw_path=str(paths.response_capture_path),
+                response_capture_path=str(paths.response_capture_path),
             )
             self._agentd_response_started = True
             self.send_response(response.status, response.reason)
@@ -340,7 +477,16 @@ class CaptureProxyHandler(BaseHTTPRequestHandler):
                 self.close_connection = True
             self.end_headers()
 
-            with paths.response_body_raw_path.open('wb') as body_file:
+            with paths.response_capture_path.open('wb') as body_file:
+                body_file.write(
+                    http_response_head(
+                        response.status,
+                        response.reason,
+                        response_headers,
+                        self.proxy.save_sensitive_headers,
+                    )
+                )
+                body_file.flush()
                 while True:
                     chunk = response.read(65536)
                     if not chunk:
@@ -353,8 +499,9 @@ class CaptureProxyHandler(BaseHTTPRequestHandler):
             self.proxy.store.update_exchange(
                 exchange_id,
                 completed_at=int(time.time()),
-                response_headers_path=str(paths.response_headers_path),
-                response_body_raw_path=str(paths.response_body_raw_path),
+                response_headers_path=str(paths.response_capture_path),
+                response_body_raw_path=str(paths.response_capture_path),
+                response_capture_path=str(paths.response_capture_path),
             )
         finally:
             conn.close()
@@ -417,17 +564,124 @@ class CaptureProxyHandler(BaseHTTPRequestHandler):
         return b''.join(chunks)
 
     def _capture_paths(self, exchange_id: str) -> CapturePaths:
-        root = self.proxy.exchange_dir()
+        period_key, root = self.proxy.exchange_dir()
+        inprogress_path = root / f'{exchange_id}.inprogress'
+        inprogress_path.write_text(str(time.time()) + '\n', encoding='utf-8')
         return CapturePaths(
-            request_headers_path=root / f'{exchange_id}-request.headers.json',
-            request_body_raw_path=root / f'{exchange_id}-request.raw',
-            request_body_decoded_path=root / f'{exchange_id}-request.json',
-            response_headers_path=root / f'{exchange_id}-response.headers.json',
-            response_body_raw_path=root / f'{exchange_id}-response.sse',
+            period_key=period_key,
+            period_dir=root,
+            inprogress_path=inprogress_path,
+            request_capture_path=root / f'{exchange_id}-request.http',
+            response_capture_path=root / f'{exchange_id}-response.http',
         )
 
     def log_message(self, format: str, *args: Any) -> None:
         return
+
+
+def normalize_archive_period(value: str) -> str:
+    raw = (value or 'week').strip().lower()
+    aliases = {'daily': 'day', 'weekly': 'week', 'monthly': 'month'}
+    period = aliases.get(raw, raw)
+    if period not in {'day', 'week', 'month'}:
+        raise ValueError('archive_period must be day, week, or month')
+    return period
+
+
+def normalize_archive_format(value: str) -> str:
+    archive_format = (value or 'tar.zst').strip().lower()
+    if archive_format != 'tar.zst':
+        raise ValueError('archive_format currently supports only tar.zst')
+    return archive_format
+
+
+def normalize_zstd_level(value: int) -> int:
+    level = int(value or 10)
+    if level < 1 or level > 22:
+        raise ValueError('zstd_level must be between 1 and 22')
+    return level
+
+
+def capture_period_key(moment: dt.datetime, archive_period: str) -> str:
+    local = moment.astimezone()
+    period = normalize_archive_period(archive_period)
+    if period == 'day':
+        return local.strftime('%Y-%m-%d')
+    if period == 'month':
+        return local.strftime('%Y-%m')
+    year, week, _ = local.isocalendar()
+    return f'{year}-W{week:02d}'
+
+
+def is_capture_period_key(value: str) -> bool:
+    return bool(CAPTURE_PERIOD_RE.match(value))
+
+
+def write_http_request(
+    path: Path,
+    method: str,
+    request_path: str,
+    headers: dict[str, str],
+    raw_body: bytes,
+    save_sensitive_headers: bool,
+) -> None:
+    stored_headers = redact_headers(headers, save_sensitive_headers)
+    path.write_bytes(http_message_head(f'{method} {request_path} HTTP/1.1', stored_headers.items()) + raw_body)
+
+
+def http_response_head(
+    status: int,
+    reason: str,
+    headers: list[tuple[str, str]],
+    save_sensitive_headers: bool,
+) -> bytes:
+    stored_headers = [
+        (key, '<redacted>' if not save_sensitive_headers and key.lower() in SENSITIVE_HEADERS else value)
+        for key, value in headers
+    ]
+    return http_message_head(f'HTTP/1.1 {status} {reason}', stored_headers)
+
+
+def http_message_head(start_line: str, headers: Any) -> bytes:
+    lines = [start_line]
+    lines.extend(f'{key}: {value}' for key, value in headers)
+    return ('\r\n'.join(lines) + '\r\n\r\n').encode('utf-8')
+
+
+def write_tar_zst_archive(source_dir: Path, archive_path: Path, *, level: int) -> None:
+    try:
+        import zstandard
+    except ModuleNotFoundError as exc:  # pragma: no cover - dependency installation issue
+        raise RuntimeError('zstandard is required to write codex capture archives') from exc
+
+    archive_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    compressor = zstandard.ZstdCompressor(level=level)
+    with (
+        archive_path.open('wb') as raw_file,
+        compressor.stream_writer(raw_file, closefd=False) as compressed,
+        tarfile.open(fileobj=compressed, mode='w|') as tar,
+    ):
+        for child in sorted(source_dir.iterdir()):
+            if child.is_file() and not child.name.startswith('.') and not child.name.endswith('.inprogress'):
+                tar.add(child, arcname=child.name, recursive=False)
+
+
+def read_tar_zst_member_names(archive_path: Path) -> set[str]:
+    try:
+        import zstandard
+    except ModuleNotFoundError as exc:  # pragma: no cover - dependency installation issue
+        raise RuntimeError('zstandard is required to read codex capture archives') from exc
+
+    members: set[str] = set()
+    decompressor = zstandard.ZstdDecompressor()
+    with (
+        archive_path.open('rb') as raw_file,
+        decompressor.stream_reader(raw_file, closefd=False) as decompressed,
+        tarfile.open(fileobj=decompressed, mode='r|') as tar,
+    ):
+        for member in tar:
+            members.add(member.name)
+    return members
 
 
 def capture_provider_overrides(base_url: str, provider_id: str = CAPTURE_PROVIDER_ID) -> list[str]:
@@ -601,6 +855,14 @@ def forward_request_headers(headers: dict[str, str], upstream: ParseResult, cont
     return result
 
 
+def ensure_model_http_exchanges_schema(conn: sqlite3.Connection) -> None:
+    conn.execute(MODEL_HTTP_EXCHANGES_SCHEMA)
+    columns = {str(row[1]) for row in conn.execute('pragma table_info(model_http_exchanges)')}
+    for column, definition in MODEL_HTTP_EXCHANGES_ADDED_COLUMNS.items():
+        if column not in columns:
+            conn.execute(f'alter table model_http_exchanges add column {column} {definition}')
+
+
 MODEL_HTTP_EXCHANGES_SCHEMA = """
 create table if not exists model_http_exchanges (
     id text primary key,
@@ -621,6 +883,25 @@ create table if not exists model_http_exchanges (
     request_body_decoded_path text,
     response_headers_path text,
     response_body_raw_path text,
+    storage_state text not null default 'live',
+    period_key text not null default '',
+    request_capture_path text,
+    response_capture_path text,
+    archive_path text,
+    archive_member_request text,
+    archive_member_response text,
+    archive_format text,
     error text
 );
 """
+
+MODEL_HTTP_EXCHANGES_ADDED_COLUMNS = {
+    'storage_state': "text not null default 'live'",
+    'period_key': "text not null default ''",
+    'request_capture_path': 'text',
+    'response_capture_path': 'text',
+    'archive_path': 'text',
+    'archive_member_request': 'text',
+    'archive_member_response': 'text',
+    'archive_format': 'text',
+}
