@@ -14,6 +14,7 @@ from agentd.capture_proxy import (
     OPENAI_RESPONSES_URL,
     CaptureContext,
     CaptureProxy,
+    capture_provider_overrides,
 )
 
 
@@ -93,6 +94,52 @@ class CaptureProxyTest(unittest.TestCase):
             )
             self.assertEqual(proxy.upstream_for_headers({'ChatGPT-Account-ID': 'acct'}), CHATGPT_RESPONSES_URL)
             self.assertEqual(proxy.upstream_for_headers({'Authorization': 'Bearer sk-test'}), OPENAI_RESPONSES_URL)
+            self.assertEqual(
+                proxy.upstream_for_path({'ChatGPT-Account-ID': 'acct'}, '/v1/responses/compact'),
+                f'{CHATGPT_RESPONSES_URL}/compact',
+            )
+
+    def test_proxy_passthrough_for_responses_subpaths(self) -> None:
+        upstream = RecordingUpstream()
+        upstream.start()
+        try:
+            with tempfile.TemporaryDirectory() as raw_dir:
+                root = Path(raw_dir)
+                proxy = CaptureProxy(
+                    capture_dir=root / 'captures',
+                    db_path=root / 'agentd.sqlite',
+                    upstream_mode='codex-default',
+                    upstream_url=f'{upstream.url}/v1/responses',
+                    context=CaptureContext(session_id=42),
+                )
+                proxy.start()
+                try:
+                    raw_body = b'{"input":[]}'
+                    request = urllib.request.Request(
+                        f'{proxy.base_url}/responses/compact',
+                        data=raw_body,
+                        method='POST',
+                        headers={'Content-Type': 'application/json'},
+                    )
+                    with urllib.request.urlopen(request, timeout=5) as response:
+                        response.read()
+
+                    self.assertEqual(upstream.requests[0]['path'], '/v1/responses/compact')
+                    self.assertEqual(upstream.requests[0]['body'], raw_body)
+                    with sqlite3.connect(root / 'agentd.sqlite') as conn:
+                        count = conn.execute('select count(*) from model_http_exchanges').fetchone()[0]
+                    self.assertEqual(count, 0)
+                finally:
+                    proxy.stop()
+        finally:
+            upstream.stop()
+
+    def test_capture_provider_overrides_use_codex_cli_dotted_paths(self) -> None:
+        overrides = capture_provider_overrides('http://127.0.0.1:1234/v1')
+
+        self.assertIn('model_provider="agentd-capture"', overrides)
+        self.assertIn('model_providers.agentd-capture.name="OpenAI"', overrides)
+        self.assertIn('model_providers.agentd-capture.base_url="http://127.0.0.1:1234/v1"', overrides)
 
     def _exchange(self, db_path: Path) -> sqlite3.Row:
         conn = sqlite3.connect(db_path)

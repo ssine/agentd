@@ -204,16 +204,23 @@ class CaptureProxy:
             )
 
     def upstream_for_headers(self, headers: dict[str, str]) -> str:
+        return self.upstream_for_path(headers, '/v1/responses')
+
+    def upstream_for_path(self, headers: dict[str, str], request_path: str) -> str:
+        suffix = ''
+        path = urlparse(request_path).path
+        if path.startswith('/v1/responses/'):
+            suffix = path.removeprefix('/v1/responses')
         if self.upstream_url:
-            return self.upstream_url
+            return f'{self.upstream_url.rstrip("/")}{suffix}'
         mode = self.upstream_mode
         if mode == 'chatgpt':
-            return CHATGPT_RESPONSES_URL
+            return f'{CHATGPT_RESPONSES_URL}{suffix}'
         if mode == 'api':
-            return OPENAI_RESPONSES_URL
+            return f'{OPENAI_RESPONSES_URL}{suffix}'
         if any(key.lower() == 'chatgpt-account-id' for key in headers):
-            return CHATGPT_RESPONSES_URL
-        return OPENAI_RESPONSES_URL
+            return f'{CHATGPT_RESPONSES_URL}{suffix}'
+        return f'{OPENAI_RESPONSES_URL}{suffix}'
 
     def exchange_dir(self) -> Path:
         today = dt.datetime.now(dt.timezone.utc).strftime('%Y-%m-%d')
@@ -230,7 +237,14 @@ class CaptureProxyHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         request_path = self.path
-        if urlparse(request_path).path != '/v1/responses':
+        parsed_path = urlparse(request_path).path
+        if parsed_path != '/v1/responses':
+            if parsed_path.startswith('/v1/responses/'):
+                request_headers = headers_to_dict(self.headers)
+                raw_body = self._read_request_body()
+                upstream_url = self.proxy.upstream_for_path(request_headers, request_path)
+                self._passthrough(upstream_url, request_headers, raw_body)
+                return
             self.send_error(404, 'agentd capture proxy only handles POST /v1/responses')
             return
 
@@ -238,7 +252,7 @@ class CaptureProxyHandler(BaseHTTPRequestHandler):
         context = self.proxy.snapshot_context()
         request_headers = headers_to_dict(self.headers)
         raw_body = self._read_request_body()
-        upstream_url = self.proxy.upstream_for_headers(request_headers)
+        upstream_url = self.proxy.upstream_for_path(request_headers, request_path)
         paths = self._capture_paths(exchange_id)
 
         decoded_body = decode_body(raw_body, header_value(request_headers, 'content-encoding'))
@@ -345,6 +359,41 @@ class CaptureProxyHandler(BaseHTTPRequestHandler):
         finally:
             conn.close()
 
+    def _passthrough(self, upstream_url: str, request_headers: dict[str, str], raw_body: bytes) -> None:
+        parsed = urlparse(upstream_url)
+        conn = connection_for_url(parsed)
+        try:
+            target = upstream_target(parsed, self.path)
+            headers = forward_request_headers(request_headers, parsed, len(raw_body))
+            conn.request('POST', target, body=raw_body, headers=headers)
+            response = conn.getresponse()
+            self._agentd_response_started = True
+            self.send_response(response.status, response.reason)
+            sent_content_length = False
+            for key, value in response.getheaders():
+                if key.lower() in HOP_BY_HOP_HEADERS:
+                    continue
+                if key.lower() == 'content-length':
+                    sent_content_length = True
+                self.send_header(key, value)
+            if not sent_content_length:
+                self.send_header('Connection', 'close')
+                self.close_connection = True
+            self.end_headers()
+            while True:
+                chunk = response.read(65536)
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+                self.wfile.flush()
+        except Exception as exc:
+            if not getattr(self, '_agentd_response_started', False):
+                self.send_error(502, f'agentd capture proxy upstream error: {exc}')
+            else:
+                self.close_connection = True
+        finally:
+            conn.close()
+
     def _read_request_body(self) -> bytes:
         if self.headers.get('Transfer-Encoding', '').lower() == 'chunked':
             return self._read_chunked_body()
@@ -382,14 +431,13 @@ class CaptureProxyHandler(BaseHTTPRequestHandler):
 
 
 def capture_provider_overrides(base_url: str, provider_id: str = CAPTURE_PROVIDER_ID) -> list[str]:
-    quoted = json.dumps(provider_id)
     return [
-        f'model_provider={quoted}',
-        f'model_providers.{quoted}.name="OpenAI"',
-        f'model_providers.{quoted}.base_url={json.dumps(base_url)}',
-        f'model_providers.{quoted}.wire_api="responses"',
-        f'model_providers.{quoted}.requires_openai_auth=true',
-        f'model_providers.{quoted}.supports_websockets=false',
+        f'model_provider={json.dumps(provider_id)}',
+        f'model_providers.{provider_id}.name="OpenAI"',
+        f'model_providers.{provider_id}.base_url={json.dumps(base_url)}',
+        f'model_providers.{provider_id}.wire_api="responses"',
+        f'model_providers.{provider_id}.requires_openai_auth=true',
+        f'model_providers.{provider_id}.supports_websockets=false',
     ]
 
 
