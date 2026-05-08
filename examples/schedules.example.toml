@@ -1,0 +1,17 @@
+# Lightweight agentd schedules. Jobs are disabled until chat_id and prompt are filled.
+
+[[jobs]]
+id = "example"
+name = "Example"
+enabled = false
+chat_id = ""
+prompt = ""
+title = "Example"
+profile = "default"
+skills = []
+
+[jobs.schedule]
+kind = "daily"
+timezone = "Asia/Shanghai"
+time = "09:00"
+

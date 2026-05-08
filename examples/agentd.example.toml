@@ -1,0 +1,32 @@
+[agentd]
+# Path to the agentd executable used by service management.
+# Relative paths are resolved from the agentd project root.
+executable = ".venv/bin/agentd"
+
+# Workspace where Codex turns run. Runtime, context profile, and schedule
+# relative paths below are resolved from this workspace.
+workspace = "."
+runtime_dir = ".agents/runtime"
+log_level = "INFO"
+context_profiles = ".agents/config/context-profiles.toml"
+schedules = ".agents/config/schedules.toml"
+
+[feishu]
+# app_id and app_secret can also be supplied by environment:
+# AGENTD_FEISHU_APP_ID, AGENTD_FEISHU_APP_SECRET
+app_id = ""
+app_secret = ""
+ignore_bot_messages = true
+main_reply_in_thread = false
+child_reply_in_thread = true
+
+[codex]
+# Defaults to the repo-local acodex wrapper if omitted.
+command = "bin/acodex"
+model = ""
+model_provider = ""
+sandbox = "danger-full-access"
+approval_policy = "never"
+turn_timeout_seconds = 1800
+startup_timeout_seconds = 60
+

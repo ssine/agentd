@@ -1,0 +1,12 @@
+.env
+.venv/
+.ruff_cache/
+__pycache__/
+*.pyc
+dist/
+build/
+src/*.egg-info/
+.agents/runtime/
+.agents/config/agentd.toml
+.agents/config/machines.toml
+
