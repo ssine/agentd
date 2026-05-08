@@ -48,6 +48,7 @@ class ActiveRun:
     running_tools: dict[str, str] = field(default_factory=dict)
     tool_details: list[str] = field(default_factory=list)
     model_outputs: list[str] = field(default_factory=list)
+    error_detail: str = ''
     last_status_body: str = ''
     final_message_sent: bool = False
     final_message_text: str = ''
@@ -441,9 +442,10 @@ class AgentDaemon:
                 active.done.set()
                 return
             self.log.exception('Codex run failed for session %s', session.id)
-            active.status = f'运行失败: {exc}'
+            self._record_error(active, str(exc))
+            active.status = failure_status('运行失败', active.error_detail)
             active.status_phase = 'failed'
-            self._add_model_message(active, f'运行失败: {exc}', phase='error')
+            self._add_model_message(active, f'运行失败: {active.error_detail}', phase='error')
             self._mark_finished(active)
             self._publish_status(active, force=True, create=True)
             active.done.set()
@@ -482,7 +484,9 @@ class AgentDaemon:
             active.status = '完成'
             active.status_phase = 'done'
         elif result.status in {'systemError', 'failed', 'error'}:
-            active.status = f'失败: {result.status}'
+            if result.final_text:
+                self._record_error(active, result.final_text)
+            active.status = codex_failure_status(result.status, active.error_detail)
             active.status_phase = 'failed'
         elif result.status not in {'', 'unknown'}:
             active.status = f'完成: {result.status}'
@@ -605,7 +609,8 @@ class AgentDaemon:
             if final_text:
                 self._send_final_once(active, final_text)
             if status in {'systemError', 'failed', 'error'}:
-                active.status = f'失败: {status}'
+                self._record_error(active, final_text)
+                active.status = codex_failure_status(status, active.error_detail)
                 active.status_phase = 'failed'
             else:
                 active.status = f'完成: {status}'
@@ -620,10 +625,17 @@ class AgentDaemon:
                 self.log.info('cleared Codex thread for session %s after invalid encrypted content', active.session.id)
             if text and (not active.model_outputs or active.model_outputs[-1] != text):
                 self._add_model_message(active, text, phase='error')
-            active.status = f'Codex error: {text}'
+            self._record_error(active, text)
+            active.status = failure_status('Codex error', active.error_detail)
             active.status_phase = 'failed'
             self._mark_finished(active)
             self._publish_status(active, force=True, create=True)
+
+    @staticmethod
+    def _record_error(active: ActiveRun, detail: str) -> None:
+        detail = str(detail or '').strip()
+        if detail:
+            active.error_detail = detail
 
     def _add_model_message(self, active: ActiveRun, text: str, *, phase: str) -> None:
         with active.status_lock:
@@ -753,6 +765,8 @@ class AgentDaemon:
             self._run_line(active, elapsed),
             self._toggle_state_line(active),
         ]
+        if active.status_phase == 'failed' and active.error_detail:
+            lines.append(f'错误信息: {compact(active.error_detail, 1200)}')
         iterations = self._visible_iterations(active)
         offset = max(0, len(active.iterations) - len(iterations))
         for index, iteration in enumerate(iterations, start=offset + 1):
@@ -777,6 +791,7 @@ class AgentDaemon:
             },
             'elements': [
                 {'tag': 'div', 'text': {'tag': 'lark_md', 'content': self._run_line(active, elapsed)}},
+                *self._error_elements(active),
                 {'tag': 'hr'},
                 *self._view_elements(active),
                 {'tag': 'action', 'actions': self._card_actions(active)},
@@ -788,6 +803,12 @@ class AgentDaemon:
 
     def _view_elements(self, active: ActiveRun) -> list[dict[str, Any]]:
         return [{'tag': 'div', 'text': {'tag': 'lark_md', 'content': self._iterations_view(active)}}]
+
+    def _error_elements(self, active: ActiveRun) -> list[dict[str, Any]]:
+        if active.status_phase != 'failed' or not active.error_detail:
+            return []
+        content = '**错误信息**\n' + escape_lark_md(compact(active.error_detail, 1800))
+        return [{'tag': 'div', 'text': {'tag': 'lark_md', 'content': content}}]
 
     def _iterations_view(self, active: ActiveRun) -> str:
         iterations = self._visible_iterations(active)
@@ -1097,6 +1118,15 @@ def friendly_tool_name(tool: str) -> str:
 
 def has_invalid_encrypted_content(text: object) -> bool:
     return 'invalid_encrypted_content' in str(text or '')
+
+
+def failure_status(prefix: str, detail: str) -> str:
+    short = compact(detail, 120).strip()
+    return f'{prefix}: {short}' if short else prefix
+
+
+def codex_failure_status(status: str, detail: str) -> str:
+    return failure_status(f'失败: {status}', detail)
 
 
 def format_elapsed(seconds: int) -> str:
