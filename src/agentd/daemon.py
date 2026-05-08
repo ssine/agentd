@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import socket
 import threading
@@ -11,7 +13,16 @@ from .codex_app_server import CodexAppServer, CodexRunControl
 from .config import AgentdConfig
 from .context import ContextResolver, ResolvedContext
 from .feishu import FeishuApi, FeishuListener, final_message_card_width_mode
-from .models import AgentSession, CardAction, IncomingMessage, SpawnRequest, TitleRequest
+from .models import (
+    AgentSession,
+    CardAction,
+    FeishuOutboxItem,
+    IncomingMessage,
+    RunEvent,
+    RunRecord,
+    SpawnRequest,
+    TitleRequest,
+)
 from .registry import Registry
 from .schedule import ScheduleJob, due_run_key
 from .title import normalize_title, title_from_text
@@ -29,37 +40,21 @@ class RunIteration:
 
 @dataclass
 class ActiveRun:
+    run_id: int
     session: AgentSession
-    source_message_id: str
     control: CodexRunControl
-    host: str
-    started_at: float
-    finished_at: float | None = None
-    status: str = '启动 Codex'
-    last_status_sent_at: float = 0.0
-    codex_thread_id: str = ''
-    turn_id: str = ''
-    status_message_id: str = ''
-    status_phase: str = 'running'
-    hide_early_iterations: bool = True
-    show_tool_details: bool = False
-    truncate_content: bool = True
-    iterations: list[RunIteration] = field(default_factory=list)
-    running_tools: dict[str, str] = field(default_factory=dict)
-    tool_details: list[str] = field(default_factory=list)
-    model_outputs: list[str] = field(default_factory=list)
-    error_detail: str = ''
-    last_status_body: str = ''
-    final_message_sent: bool = False
-    final_message_text: str = ''
-    status_lock: threading.Lock = field(default_factory=threading.Lock)
     done: threading.Event = field(default_factory=threading.Event)
-    subject: str = 'Codex'
-    display_title: str = ''
     handoff_child_session_id: int | None = None
-    status_reply_in_thread: bool = False
-    context_profile: str = ''
-    context_skills: tuple[str, ...] = ()
+
+
+@dataclass
+class RunView:
+    run: RunRecord
+    session: AgentSession
+    iterations: list[RunIteration]
+    running_tools: dict[str, str]
+    tool_details: list[str]
+    model_outputs: list[str]
 
 
 class AgentDaemon:
@@ -73,7 +68,7 @@ class AgentDaemon:
         self.host = socket.gethostname()
         self._active_lock = threading.Lock()
         self._active_runs: dict[int, ActiveRun] = {}
-        self._status_runs: dict[str, ActiveRun] = {}
+        self._outbox_lock = threading.Lock()
         self._spawn_watcher_started = False
         self._spawn_watcher_lock = threading.Lock()
         self._scheduler_started = False
@@ -82,6 +77,7 @@ class AgentDaemon:
     def serve(self) -> None:
         self._ensure_spawn_watcher()
         self._ensure_scheduler()
+        self._recover_stale_runs()
         listener = FeishuListener(self.config.feishu)
         self.log.info('starting Feishu listener')
         listener.start(self.handle_message, self.handle_card_action)
@@ -96,6 +92,10 @@ class AgentDaemon:
     def _spawn_watcher(self) -> None:
         while True:
             try:
+                self._recover_stale_runs()
+                self.registry.reset_stuck_outbox()
+                self._reconcile_dirty_cards()
+                self._drain_feishu_outbox()
                 self._maybe_run_deferred_service_command()
                 for request in self.registry.claim_pending_title_requests():
                     self._handle_title_request(request)
@@ -128,7 +128,7 @@ class AgentDaemon:
             return
         with self._active_lock:
             active_count = len(self._active_runs)
-        if active_count:
+        if active_count or self.registry.active_run_count():
             return
 
         clear_deferred_service_command(self.config)
@@ -176,23 +176,26 @@ class AgentDaemon:
         if self._active_for(session.id) is not None:
             self.log.info('scheduled job %s is due but session %s is already active', job.id, session.id)
             return
+        if self.registry.get_active_run_for_session(session.id) is not None:
+            self.log.info('scheduled job %s is due but session %s has a persisted active run', job.id, session.id)
+            return
         if not self.registry.claim_schedule_run(job.id, run_key):
             return
         self._start_scheduled_job(job, run_key, session)
 
     def _start_scheduled_job(self, job: ScheduleJob, run_key: str, session: AgentSession) -> None:
-        active = ActiveRun(
-            session=session,
+        run = self.registry.create_run(
+            session_id=session.id,
             source_message_id=f'schedule:{job.id}:{run_key}',
-            control=CodexRunControl(),
+            prompt=self._build_scheduled_prompt(job, session, run_key),
             host=self.host,
-            started_at=time.time(),
             status='启动定时任务',
             subject='定时任务',
             display_title=normalize_title(job.title or job.name, fallback='定时任务'),
             context_profile=job.context_profile or self.config.context.default_profile,
-            context_skills=job.skills,
+            skills=job.skills,
         )
+        active = ActiveRun(run_id=run.id, session=session, control=CodexRunControl())
         with self._active_lock:
             self._active_runs[session.id] = active
 
@@ -205,7 +208,7 @@ class AgentDaemon:
         ).start()
         worker = threading.Thread(
             target=self._run_turn_worker,
-            args=(active, self._build_scheduled_prompt(job, session, run_key)),
+            args=(active,),
             name=f'agentd-schedule-{session.id}',
         )
         worker.start()
@@ -218,7 +221,7 @@ class AgentDaemon:
             return
 
         title = normalize_title(request.title, fallback='任务')
-        active.display_title = title
+        self.registry.update_run(active.run_id, display_title=title)
         try:
             ok, detail = active.control.set_thread_name(title)
         except Exception as exc:
@@ -234,43 +237,51 @@ class AgentDaemon:
         if parent is None:
             self.registry.finish_spawn_request(request.id, state='failed', error='parent session is not active')
             return
-        if not parent.status_message_id:
+        parent_run = self.registry.get_run(parent.run_id)
+        if parent_run is None:
+            self.registry.finish_spawn_request(request.id, state='failed', error='parent run is missing')
+            return
+        if not parent_run.status_message_id:
+            self._publish_status(parent, force=True, create=True)
+            self._drain_feishu_outbox()
+            parent_run = self.registry.get_run(parent.run_id)
+        if parent_run is None or not parent_run.status_message_id:
             self.registry.finish_spawn_request(request.id, state='failed', error='parent run has no status card')
             return
 
         try:
-            thread_id, source_message_id = self._create_child_thread(parent, request)
+            thread_id, source_message_id = self._create_child_thread(parent_run, request)
             child_session = self.registry.bind_child_session(
                 request.chat_id,
                 thread_id,
                 request.cwd,
-                root_message_id=parent.status_message_id,
+                root_message_id=parent_run.status_message_id,
                 parent_id=parent.session.id,
                 context_profile=request.context_profile or self.config.context.default_child_profile,
                 skills=request.skills,
             )
             parent.handoff_child_session_id = child_session.id
+            self.registry.update_run(parent.run_id, handoff_child_session_id=child_session.id)
             parent.control.interrupt()
             parent.done.set()
             with self._active_lock:
                 self._active_runs.pop(parent.session.id, None)
 
-            child = ActiveRun(
-                session=child_session,
-                source_message_id=parent.status_message_id,
-                control=CodexRunControl(),
+            child_run = self.registry.create_run(
+                session_id=child_session.id,
+                source_message_id=parent_run.status_message_id,
+                prompt=self._build_child_prompt(request, child_session, source_message_id),
                 host=self.host,
-                started_at=time.time(),
                 status='启动子任务',
-                status_message_id=parent.status_message_id,
+                status_message_id=parent_run.status_message_id,
                 subject='子任务',
                 display_title=normalize_title(request.title or title_from_text(request.prompt, fallback='子任务')),
                 context_profile=request.context_profile or self.config.context.default_child_profile,
-                context_skills=request.skills,
+                skills=request.skills,
             )
+            child = ActiveRun(run_id=child_run.id, session=child_session, control=CodexRunControl())
             with self._active_lock:
                 self._active_runs[child_session.id] = child
-                self._status_runs[parent.status_message_id] = child
 
             self._publish_status(child, force=True, create=True)
             threading.Thread(
@@ -281,7 +292,7 @@ class AgentDaemon:
             ).start()
             child_worker = threading.Thread(
                 target=self._run_turn_worker,
-                args=(child, self._build_child_prompt(request, child_session, source_message_id)),
+                args=(child,),
                 name=f'agentd-session-{child_session.id}',
             )
             child_worker.daemon = False
@@ -289,13 +300,18 @@ class AgentDaemon:
             self.registry.finish_spawn_request(request.id, state='started')
         except Exception as exc:
             self.log.exception('failed to spawn child request %s', request.id)
-            parent.status = f'子任务启动失败: {exc}'
-            parent.status_phase = 'failed'
-            self._mark_finished(parent)
+            self.registry.update_run(
+                parent.run_id,
+                status=f'子任务启动失败: {exc}',
+                status_phase='failed',
+                state='failed',
+                finished_at=int(time.time()),
+            )
+            self._add_model_message(parent, f'子任务启动失败: {exc}', phase='error')
             self._publish_status(parent, force=True, create=True)
             self.registry.finish_spawn_request(request.id, state='failed', error=str(exc))
 
-    def _create_child_thread(self, parent: ActiveRun, request: SpawnRequest) -> tuple[str, str]:
+    def _create_child_thread(self, parent: RunRecord, request: SpawnRequest) -> tuple[str, str]:
         if self.dry_send:
             return f'dry-thread-{request.id}', f'dry-thread-message-{request.id}'
         text = '\n'.join(
@@ -329,32 +345,34 @@ class AgentDaemon:
         active = self._active_for(session.id)
         if active is not None:
             return self._handle_live_input(active, message)
+        self._recover_stale_runs()
+        persisted_active = self.registry.get_active_run_for_session(session.id)
+        if persisted_active is not None:
+            self._publish_status_for_run(persisted_active.id, force=True)
+            return 'session already has an active run'
 
         context_profile = session.context_profile or self.config.context.default_profile
         context_skills = session.skills
         prompt = self._build_prompt(message, session)
-        control = CodexRunControl()
         reuse_root_card = session.kind == 'child' and message.message_id == session.root_message_id
         source_message_id = (
             session.root_message_id if reuse_root_card and session.root_message_id else message.message_id
         )
-        active = ActiveRun(
-            session=session,
+        run = self.registry.create_run(
+            session_id=session.id,
             source_message_id=source_message_id,
-            control=control,
+            prompt=prompt,
             host=self.host,
-            started_at=time.time(),
             status_message_id=session.root_message_id if reuse_root_card and session.root_message_id else '',
             subject='子任务' if session.kind == 'child' else 'Codex',
             display_title=title_from_text(message.text, fallback='子任务' if session.kind == 'child' else '主任务'),
             status_reply_in_thread=session.kind == 'child' and not reuse_root_card,
             context_profile=context_profile,
-            context_skills=context_skills,
+            skills=context_skills,
         )
+        active = ActiveRun(run_id=run.id, session=session, control=CodexRunControl())
         with self._active_lock:
             self._active_runs[session.id] = active
-            if active.status_message_id:
-                self._status_runs[active.status_message_id] = active
 
         self._publish_status(active, force=True, create=True)
         ticker = threading.Thread(
@@ -367,7 +385,7 @@ class AgentDaemon:
 
         worker = threading.Thread(
             target=self._run_turn_worker,
-            args=(active, prompt),
+            args=(active,),
             name=f'agentd-session-{session.id}',
         )
         worker.start()
@@ -375,61 +393,75 @@ class AgentDaemon:
         return 'started'
 
     def handle_card_action(self, action: CardAction) -> str:
-        active = self._run_for_card_action(action)
-        if active is None:
+        run, active = self._run_for_card_action(action)
+        if run is None:
             return '任务状态已过期'
 
         if action.action == 'stop':
-            ok, detail = active.control.interrupt()
-            if ok:
-                active.status = '已请求停止'
-                self._add_model_message(active, '用户在卡片上请求停止当前 turn。', phase='control')
-                self._publish_status(active, force=True, create=True)
-                return '已请求停止'
-            return detail
+            if active is not None:
+                ok, detail = active.control.interrupt()
+                if ok:
+                    self.registry.update_run(active.run_id, state='cancel_requested', status='已请求停止')
+                    self._add_model_message(active, '用户在卡片上请求停止当前 turn。', phase='control')
+                    self._publish_status(active, force=True, create=True)
+                    return '已请求停止'
+                return detail
+            self.registry.update_run(run.id, state='cancel_requested', status='已记录停止请求')
+            self.registry.append_run_event(
+                run.id,
+                'agent_message',
+                {'text': '用户在卡片上请求停止当前 turn。', 'phase': 'control'},
+            )
+            self._publish_status_for_run(run.id, force=True)
+            return '已记录停止请求'
 
         if action.action == 'toggle_early':
-            active.hide_early_iterations = not active.hide_early_iterations
-            self._publish_status(active, force=True, create=True)
+            self.registry.update_run(run.id, hide_early_iterations=not run.hide_early_iterations)
+            self._publish_status_for_run(run.id, force=True)
             return '已切换早期步骤显示'
 
         if action.action == 'toggle_tools':
-            active.show_tool_details = not active.show_tool_details
-            self._publish_status(active, force=True, create=True)
+            self.registry.update_run(run.id, show_tool_details=not run.show_tool_details)
+            self._publish_status_for_run(run.id, force=True)
             return '已切换工具详情显示'
 
         if action.action == 'toggle_truncate':
-            active.truncate_content = not active.truncate_content
-            self._publish_status(active, force=True, create=True)
+            self.registry.update_run(run.id, truncate_content=not run.truncate_content)
+            self._publish_status_for_run(run.id, force=True)
             return '已切换截断策略'
 
         if action.action in {'live', 'history', 'tools', 'output'}:
-            self._handle_legacy_view_action(active, action.action)
-            self._publish_status(active, force=True, create=True)
+            self._handle_legacy_view_action(run.id, action.action)
+            self._publish_status_for_run(run.id, force=True)
             return '已切换视图'
 
         return '未知操作'
 
-    def _run_for_card_action(self, action: CardAction) -> ActiveRun | None:
+    def _run_for_card_action(self, action: CardAction) -> tuple[RunRecord | None, ActiveRun | None]:
+        run = self.registry.get_run_for_status_card(action.message_id) if action.message_id else None
         with self._active_lock:
-            if action.message_id and action.message_id in self._status_runs:
-                return self._status_runs[action.message_id]
-            if action.session_id is not None and action.session_id in self._active_runs:
-                return self._active_runs[action.session_id]
-            if action.session_id is not None:
-                for run in self._status_runs.values():
-                    if run.session.id == action.session_id:
-                        return run
-        return None
+            active = self._active_runs.get(run.session_id) if run is not None else None
+            if run is None and action.session_id is not None:
+                active = self._active_runs.get(action.session_id)
+                if active is not None:
+                    run = self.registry.get_run(active.run_id)
+        if run is None and action.session_id is not None:
+            run = self.registry.get_active_run_for_session(action.session_id)
+        return run, active
 
-    def _run_turn_worker(self, active: ActiveRun, prompt: str) -> None:
+    def _run_turn_worker(self, active: ActiveRun) -> None:
         session = active.session
+        run = self.registry.get_run(active.run_id)
+        if run is None:
+            active.done.set()
+            return
+        self.registry.update_run(active.run_id, state='running', host=self.host)
         codex = CodexAppServer(self.config.codex, self.config.log_dir)
-        resolved_context = self.context_resolver.resolve(active.context_profile, active.context_skills)
+        resolved_context = self.context_resolver.resolve(run.context_profile, run.skills)
         try:
             result = codex.run_turn(
                 session,
-                prompt,
+                run.prompt,
                 event_sink=lambda event: self._handle_codex_event(active, event),
                 control=active.control,
                 extra_env=self._codex_extra_env(active),
@@ -442,11 +474,16 @@ class AgentDaemon:
                 active.done.set()
                 return
             self.log.exception('Codex run failed for session %s', session.id)
-            self._record_error(active, str(exc))
-            active.status = failure_status('运行失败', active.error_detail)
-            active.status_phase = 'failed'
-            self._add_model_message(active, f'运行失败: {active.error_detail}', phase='error')
-            self._mark_finished(active)
+            error_detail = str(exc)
+            self.registry.update_run(
+                active.run_id,
+                state='failed',
+                status=failure_status('运行失败', error_detail),
+                status_phase='failed',
+                error=error_detail,
+                finished_at=int(time.time()),
+            )
+            self._add_model_message(active, f'运行失败: {error_detail}', phase='error')
             self._publish_status(active, force=True, create=True)
             active.done.set()
             with self._active_lock:
@@ -461,44 +498,72 @@ class AgentDaemon:
 
         if result.codex_thread_id != session.codex_thread_id:
             self.registry.update_codex_thread(session.id, result.codex_thread_id)
+            self.registry.update_run(active.run_id, codex_thread_id=result.codex_thread_id)
         elif session.codex_thread_id and (
             result.status == 'systemError' or has_invalid_encrypted_content(result.final_text)
         ):
             self.registry.update_codex_thread(session.id, '')
+            self.registry.update_run(active.run_id, codex_thread_id='')
 
+        run = self.registry.get_run(active.run_id)
         if result.final_text:
             final_text = result.final_text
-        elif active.final_message_text:
-            final_text = active.final_message_text
+        elif run and run.final_message_text:
+            final_text = run.final_message_text
         elif result.status == 'interrupted':
             final_text = '已停止当前 Codex turn。'
         else:
             final_text = f'Codex turn completed with status: {result.status}'
 
-        if final_text and (not active.model_outputs or active.model_outputs[-1] != final_text):
+        if final_text and self._last_model_output(active.run_id) != final_text:
             self._add_model_message(active, final_text, phase='final_answer')
         if result.status == 'interrupted':
-            active.status = '已停止'
-            active.status_phase = 'stopped'
+            self.registry.update_run(
+                active.run_id,
+                state='interrupted',
+                status='已停止',
+                status_phase='stopped',
+                finished_at=int(time.time()),
+            )
         elif result.status in {'completed', 'success'}:
-            active.status = '完成'
-            active.status_phase = 'done'
+            self.registry.update_run(
+                active.run_id,
+                state='succeeded',
+                status='完成',
+                status_phase='done',
+                finished_at=int(time.time()),
+            )
         elif result.status in {'systemError', 'failed', 'error'}:
-            if result.final_text:
-                self._record_error(active, result.final_text)
-            active.status = codex_failure_status(result.status, active.error_detail)
-            active.status_phase = 'failed'
+            error_detail = result.final_text
+            self.registry.update_run(
+                active.run_id,
+                state='failed',
+                status=codex_failure_status(result.status, error_detail),
+                status_phase='failed',
+                error=error_detail,
+                finished_at=int(time.time()),
+            )
         elif result.status not in {'', 'unknown'}:
-            active.status = f'完成: {result.status}'
-            active.status_phase = 'done'
+            self.registry.update_run(
+                active.run_id,
+                state='succeeded',
+                status=f'完成: {result.status}',
+                status_phase='done',
+                finished_at=int(time.time()),
+            )
         else:
-            active.status = '完成'
-            active.status_phase = 'done'
-        self._mark_finished(active)
-        self._publish_status(active, force=True, create=bool(active.status_message_id))
+            self.registry.update_run(
+                active.run_id,
+                state='succeeded',
+                status='完成',
+                status_phase='done',
+                finished_at=int(time.time()),
+            )
+        run = self.registry.get_run(active.run_id)
+        self._publish_status(active, force=True, create=bool(run and run.status_message_id))
 
         try:
-            self._send_final_once(active, final_text)
+            self._queue_final_once(active, final_text)
         finally:
             active.done.set()
             with self._active_lock:
@@ -510,6 +575,7 @@ class AgentDaemon:
 
     def _status_ticker(self, active: ActiveRun) -> None:
         while not active.done.wait(5):
+            self.registry.touch_run_lease(active.run_id)
             self._publish_status(active, force=True, create=True)
 
     def _handle_live_input(self, active: ActiveRun, message: IncomingMessage) -> str:
@@ -521,60 +587,65 @@ class AgentDaemon:
         if lower in {'/stop', '/interrupt', 'stop', 'interrupt', '停', '停止', '打断', '别做了'}:
             ok, detail = active.control.interrupt()
             if ok:
-                active.status = '已请求停止'
+                self.registry.update_run(active.run_id, state='cancel_requested', status='已请求停止')
                 self._add_model_message(active, '用户请求停止当前 turn。', phase='control')
                 self._publish_status(active, force=True, create=True)
             else:
-                active.status = f'停止失败: {detail}'
+                self.registry.update_run(active.run_id, status=f'停止失败: {detail}')
                 self._publish_status(active, force=True, create=True)
             return detail
 
         ok, detail = active.control.steer(text)
         if ok:
-            active.status = '已追加指令'
+            self.registry.update_run(active.run_id, status='已追加指令')
             self._add_model_message(active, f'用户追加指令：{text}', phase='control')
             self._publish_status(active, force=True, create=True)
         else:
-            active.status = f'追加失败: {detail}'
+            self.registry.update_run(active.run_id, status=f'追加失败: {detail}')
             self._publish_status(active, force=True, create=True)
         return detail
 
     def _handle_codex_event(self, active: ActiveRun, event: dict[str, Any]) -> None:
         if active.handoff_child_session_id is not None:
             return
+        self.registry.touch_run_lease(active.run_id)
         event_type = str(event.get('type') or '')
         if event_type == 'thread_ready':
-            active.codex_thread_id = str(event.get('codex_thread_id') or '')
-            active.status = 'Codex thread ready'
-            if active.display_title:
+            codex_thread_id = str(event.get('codex_thread_id') or '')
+            self.registry.update_run(active.run_id, codex_thread_id=codex_thread_id, status='Codex thread ready')
+            run = self.registry.get_run(active.run_id)
+            if run and run.display_title:
                 try:
-                    active.control.set_thread_name(active.display_title)
+                    active.control.set_thread_name(run.display_title)
                 except Exception:
                     self.log.exception('failed to set Codex thread name for session %s', active.session.id)
             self._publish_status(active, create=False)
         elif event_type == 'turn_started':
-            active.turn_id = str(event.get('turn_id') or '')
-            active.status = 'turn running'
+            self.registry.update_run(active.run_id, turn_id=str(event.get('turn_id') or ''), status='turn running')
             self._publish_status(active, create=False)
         elif event_type == 'thread_name_updated':
             text = str(event.get('text') or '')
             if text:
-                active.display_title = normalize_title(text, fallback=active.display_title or '任务')
+                run = self.registry.get_run(active.run_id)
+                self.registry.update_run(
+                    active.run_id,
+                    display_title=normalize_title(text, fallback=(run.display_title if run else '') or '任务'),
+                )
                 self._publish_status(active, force=True, create=True)
         elif event_type == 'agent_message':
             phase = str(event.get('phase') or 'commentary')
             text = str(event.get('text') or '')
             if text:
-                active.status = '生成回答' if phase == 'final_answer' else '模型输出'
+                self.registry.update_run(active.run_id, status='生成回答' if phase == 'final_answer' else '模型输出')
                 self._add_model_message(active, text, phase=phase)
                 self._publish_status(active, force=True, create=True)
         elif event_type == 'final_answer_ready':
-            self._send_final_once(active, str(event.get('text') or ''))
+            self._queue_final_once(active, str(event.get('text') or ''))
         elif event_type == 'plan_updated':
-            active.status = f'计划: {event.get("text")}'
+            self.registry.update_run(active.run_id, status=f'计划: {event.get("text")}')
             self._publish_status(active)
         elif event_type == 'command_started':
-            active.status = '执行 Bash'
+            self.registry.update_run(active.run_id, status='执行 Bash')
             self._add_tool(
                 active, 'Bash', item_id=str(event.get('item_id') or ''), detail=str(event.get('command') or '')
             )
@@ -582,205 +653,376 @@ class AgentDaemon:
         elif event_type == 'command_completed':
             exit_code = event.get('exit_code')
             self._finish_tool(active, str(event.get('item_id') or ''), failed=exit_code not in (None, 0))
-            active.status = 'Bash 完成' if exit_code in (None, 0) else f'Bash 失败: exit={exit_code}'
+            self.registry.update_run(
+                active.run_id,
+                status='Bash 完成' if exit_code in (None, 0) else f'Bash 失败: exit={exit_code}',
+            )
             self._publish_status(active)
         elif event_type == 'tool_started':
             tool = friendly_tool_name(str(event.get('tool') or 'Tool'))
-            active.status = f'调用 {tool}'
+            self.registry.update_run(active.run_id, status=f'调用 {tool}')
             self._add_tool(active, tool, item_id=str(event.get('item_id') or ''))
             self._publish_status(active, create=True)
         elif event_type == 'file_change_started':
-            active.status = '修改文件'
+            self.registry.update_run(active.run_id, status='修改文件')
             self._add_tool(active, 'File edit', item_id=str(event.get('item_id') or ''))
             self._publish_status(active, create=True)
         elif event_type in {'tool_completed', 'file_change_completed'}:
             self._finish_tool(active, str(event.get('item_id') or ''))
             self._publish_status(active)
         elif event_type == 'turn_interrupted':
-            active.status = '已停止'
-            active.status_phase = 'stopped'
-            self._mark_finished(active)
+            self.registry.update_run(
+                active.run_id,
+                state='interrupted',
+                status='已停止',
+                status_phase='stopped',
+                finished_at=int(time.time()),
+            )
             self._publish_status(active, force=True, create=True)
         elif event_type == 'turn_completed':
             status = str(event.get('status') or '')
             final_text = str(event.get('final_text') or '').strip()
-            if final_text and (not active.model_outputs or active.model_outputs[-1] != final_text):
+            if final_text and self._last_model_output(active.run_id) != final_text:
                 self._add_model_message(active, final_text, phase='final_answer')
             if final_text:
-                self._send_final_once(active, final_text)
+                self._queue_final_once(active, final_text)
             if status in {'systemError', 'failed', 'error'}:
-                self._record_error(active, final_text)
-                active.status = codex_failure_status(status, active.error_detail)
-                active.status_phase = 'failed'
+                self.registry.update_run(
+                    active.run_id,
+                    state='failed',
+                    status=codex_failure_status(status, final_text),
+                    status_phase='failed',
+                    error=final_text,
+                    finished_at=int(time.time()),
+                )
             else:
-                active.status = f'完成: {status}'
-                active.status_phase = 'done'
-            self._mark_finished(active)
+                self.registry.update_run(
+                    active.run_id,
+                    state='succeeded',
+                    status=f'完成: {status}',
+                    status_phase='done',
+                    finished_at=int(time.time()),
+                )
             self._publish_status(active, force=True, create=False)
         elif event_type == 'error':
             text = str(event.get('text') or '')
             if active.session.codex_thread_id and has_invalid_encrypted_content(text):
                 self.registry.update_codex_thread(active.session.id, '')
-                active.codex_thread_id = ''
+                self.registry.update_run(active.run_id, codex_thread_id='')
                 self.log.info('cleared Codex thread for session %s after invalid encrypted content', active.session.id)
-            if text and (not active.model_outputs or active.model_outputs[-1] != text):
+            if text and self._last_model_output(active.run_id) != text:
                 self._add_model_message(active, text, phase='error')
-            self._record_error(active, text)
-            active.status = failure_status('Codex error', active.error_detail)
-            active.status_phase = 'failed'
-            self._mark_finished(active)
+            self.registry.update_run(
+                active.run_id,
+                state='failed',
+                status=failure_status('Codex error', text),
+                status_phase='failed',
+                error=text,
+                finished_at=int(time.time()),
+            )
             self._publish_status(active, force=True, create=True)
 
-    @staticmethod
-    def _record_error(active: ActiveRun, detail: str) -> None:
-        detail = str(detail or '').strip()
-        if detail:
-            active.error_detail = detail
-
     def _add_model_message(self, active: ActiveRun, text: str, *, phase: str) -> None:
-        with active.status_lock:
-            active.iterations.append(RunIteration(message=text.strip(), phase=phase))
-            active.model_outputs.append(text.strip())
+        text = text.strip()
+        if not text:
+            return
+        self.registry.append_run_event(active.run_id, 'agent_message', {'text': text, 'phase': phase})
+        if phase == 'final_answer':
+            self.registry.update_run(active.run_id, final_message_text=text)
+        self.registry.mark_card_dirty(active.run_id)
 
     def _add_tool(self, active: ActiveRun, tool: str, *, item_id: str = '', detail: str = '') -> None:
-        with active.status_lock:
-            iteration = self._current_iteration(active)
-            iteration.tool_counts[tool] = iteration.tool_counts.get(tool, 0) + 1
-            if item_id:
-                active.running_tools[item_id] = tool
-                iteration.running_tools[tool] = iteration.running_tools.get(tool, 0) + 1
-            if detail:
-                tool_detail = f'{tool}: {detail}'
-                iteration.tool_details.append(tool_detail)
-                active.tool_details.append(compact(tool_detail, 220))
-                active.tool_details = active.tool_details[-80:]
+        self.registry.append_run_event(
+            active.run_id,
+            'tool_started',
+            {'tool': tool, 'item_id': item_id, 'detail': detail},
+        )
+        self.registry.mark_card_dirty(active.run_id)
 
     def _finish_tool(self, active: ActiveRun, item_id: str, *, failed: bool = False) -> None:
         if not item_id:
             return
-        with active.status_lock:
-            tool = active.running_tools.pop(item_id, '')
-            if not tool:
-                return
-            for iteration in reversed(active.iterations):
-                if iteration.running_tools.get(tool, 0) > 0:
-                    iteration.running_tools[tool] -= 1
-                    if iteration.running_tools[tool] <= 0:
-                        iteration.running_tools.pop(tool, None)
-                    if failed:
-                        iteration.failed_tool_counts[tool] = iteration.failed_tool_counts.get(tool, 0) + 1
-                    break
+        self.registry.append_run_event(
+            active.run_id,
+            'tool_completed',
+            {'item_id': item_id, 'failed': failed},
+        )
+        self.registry.mark_card_dirty(active.run_id)
 
-    def _send_final_once(self, active: ActiveRun, final_text: str) -> bool:
+    def _queue_final_once(self, active: ActiveRun, final_text: str) -> bool:
         final_text = final_text.strip()
         if not final_text or active.handoff_child_session_id is not None:
             return False
-
-        with active.status_lock:
-            if active.final_message_sent:
-                return False
-            active.final_message_sent = True
-            active.final_message_text = final_text
-
-        try:
-            final_width_mode = final_message_card_width_mode(final_text)
-            if self.dry_send:
-                print(final_text)
-            elif active.session.kind in {'main', 'schedule'}:
-                self.feishu.send_markdown(active.session.chat_id, final_text, width_mode=final_width_mode)
-            else:
-                self.feishu.reply_markdown(
-                    active.source_message_id,
-                    final_text,
-                    reply_in_thread=self.config.feishu.child_reply_in_thread,
-                    width_mode=final_width_mode,
-                )
-            return True
-        except Exception:
-            with active.status_lock:
-                active.final_message_sent = False
-                active.final_message_text = ''
-            self.log.exception('failed to send final Feishu message for session %s', active.session.id)
+        run = self.registry.get_run(active.run_id)
+        if run is None:
             return False
-
-    @staticmethod
-    def _mark_finished(active: ActiveRun) -> None:
-        if active.finished_at is None:
-            active.finished_at = time.time()
-
-    @staticmethod
-    def _current_iteration(active: ActiveRun) -> RunIteration:
-        if not active.iterations:
-            active.iterations.append(RunIteration(message='准备中', phase='system'))
-        return active.iterations[-1]
+        self.registry.update_run(active.run_id, final_message_text=final_text)
+        self.registry.upsert_outbox(
+            kind='final_reply',
+            dedupe_key=f'run:{active.run_id}:final',
+            run_id=active.run_id,
+            replace_sent=False,
+            payload={
+                'chat_id': active.session.chat_id,
+                'session_kind': active.session.kind,
+                'source_message_id': run.source_message_id,
+                'text': final_text,
+                'reply_in_thread': self.config.feishu.child_reply_in_thread,
+            },
+        )
+        self._drain_feishu_outbox()
+        return True
 
     def _publish_status(self, active: ActiveRun, *, force: bool = False, create: bool = True) -> None:
-        now = time.time()
-        if not force and now - active.last_status_sent_at < 2:
+        run = self.registry.get_run(active.run_id)
+        if run is None:
             return
+        if not create and not run.status_message_id:
+            return
+        self.registry.mark_card_dirty(active.run_id)
+        self._reconcile_dirty_cards(run_id=active.run_id)
+        self._drain_feishu_outbox()
 
-        text = self._format_status_text(active)
-        if not force and text == active.last_status_body:
-            return
-        if not create and not active.status_message_id:
-            return
+    def _publish_status_for_run(self, run_id: int, *, force: bool = False) -> None:
+        self.registry.mark_card_dirty(run_id)
+        self._reconcile_dirty_cards(run_id=run_id)
+        self._drain_feishu_outbox()
 
-        if self.dry_send:
-            print(text)
-            if create and not active.status_message_id:
-                active.status_message_id = 'dry-run-status'
-                with self._active_lock:
-                    self._status_runs[active.status_message_id] = active
-            active.last_status_sent_at = now
-            active.last_status_body = text
-            return
+    def _recover_stale_runs(self) -> None:
+        now = int(time.time())
+        with self._active_lock:
+            active_session_ids = set(self._active_runs)
+        for run in self.registry.list_stale_active_runs(now=now):
+            if run.session_id in active_session_ids:
+                continue
+            self.registry.update_run(
+                run.id,
+                state='interrupted',
+                status='agentd 重启后检测到运行中 turn 已失去控制',
+                status_phase='stopped',
+                error='run lease expired after daemon restart',
+                finished_at=now,
+            )
+            self.registry.append_run_event(
+                run.id,
+                'agent_message',
+                {
+                    'phase': 'error',
+                    'text': 'agentd 重启后无法重新附着到正在执行的 Codex turn，已将本次运行标记为中断。',
+                },
+            )
+            self.registry.mark_card_dirty(run.id)
 
-        card = self._build_status_card(active)
+    def _reconcile_dirty_cards(self, *, run_id: int | None = None, limit: int = 20) -> None:
+        runs = [self.registry.get_run(run_id)] if run_id is not None else self.registry.list_dirty_card_runs(limit)
+        for run in runs:
+            if run is None:
+                continue
+            view = self._load_run_view(run.id)
+            if view is None:
+                continue
+            text = self._format_status_text(view)
+            card = self._build_status_card(view)
+            render_hash = self._card_render_hash(card)
+            projection = self.registry.get_card_projection(run.id)
+            remote_message_id = run.status_message_id
+            if projection is not None and not remote_message_id:
+                remote_message_id = str(projection['remote_message_id'] or '')
+            if (
+                projection is not None
+                and remote_message_id
+                and str(projection['last_render_hash'] or '') == render_hash
+            ):
+                self.registry.mark_card_enqueued(run.id, render_hash=render_hash)
+                continue
+            action = 'update' if remote_message_id else ('reply' if run.status_reply_in_thread else 'create')
+            self.registry.upsert_outbox(
+                kind='status_card',
+                dedupe_key=f'run:{run.id}:status_card',
+                run_id=run.id,
+                replace_sent=True,
+                payload={
+                    'action': action,
+                    'chat_id': view.session.chat_id,
+                    'source_message_id': run.source_message_id,
+                    'message_id': remote_message_id,
+                    'reply_in_thread': self.config.feishu.child_reply_in_thread,
+                    'card': card,
+                    'text': text,
+                    'render_hash': render_hash,
+                },
+            )
+            self.registry.mark_card_enqueued(run.id, render_hash=render_hash)
+
+    @staticmethod
+    def _card_render_hash(card: dict[str, Any]) -> str:
+        raw = json.dumps(card, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode('utf-8')
+        return hashlib.sha256(raw).hexdigest()
+
+    def _drain_feishu_outbox(self, *, limit: int = 20) -> None:
+        if not self._outbox_lock.acquire(blocking=False):
+            return
         try:
-            if active.status_message_id:
-                self.feishu.update_interactive(active.status_message_id, card)
-            else:
-                if active.status_reply_in_thread:
-                    result = self.feishu.reply_interactive(
-                        active.source_message_id,
-                        card,
-                        reply_in_thread=self.config.feishu.child_reply_in_thread,
-                    )
-                else:
-                    result = self.feishu.send_interactive(active.session.chat_id, card)
-                message_id = message_id_from_result(result)
-                if message_id:
-                    active.status_message_id = message_id
-                    with self._active_lock:
-                        self._status_runs[message_id] = active
-            active.last_status_sent_at = now
-            active.last_status_body = text
-        except Exception:
-            self.log.exception('failed to publish Feishu status message for session %s', active.session.id)
+            for item in self.registry.claim_pending_outbox(limit):
+                try:
+                    remote_message_id = self._send_feishu_outbox_item(item)
+                    if item.kind == 'status_card' and item.run_id is not None:
+                        self.registry.mark_card_sent(
+                            item.run_id,
+                            remote_message_id=remote_message_id,
+                            render_hash=str(item.payload.get('render_hash') or ''),
+                        )
+                    elif item.kind == 'final_reply' and item.run_id is not None:
+                        self.registry.update_run(item.run_id, final_message_sent_at=int(time.time()))
+                    self.registry.finish_outbox(item.id, sent=True)
+                except Exception as exc:
+                    self.log.exception('failed to send Feishu outbox item %s', item.id)
+                    if item.kind == 'status_card' and item.run_id is not None:
+                        self.registry.mark_card_error(item.run_id, str(exc))
+                    self.registry.finish_outbox(item.id, sent=False, error=str(exc))
+        finally:
+            self._outbox_lock.release()
 
-    def _format_status_text(self, active: ActiveRun) -> str:
+    def _send_feishu_outbox_item(self, item: FeishuOutboxItem) -> str:
+        payload = item.payload
+        if item.kind == 'status_card':
+            card = payload.get('card') if isinstance(payload.get('card'), dict) else {}
+            action = str(payload.get('action') or 'create')
+            message_id = str(payload.get('message_id') or '')
+            if self.dry_send:
+                print(str(payload.get('text') or ''))
+                return message_id or 'dry-run-status'
+            if action == 'update' and message_id:
+                result = self.feishu.update_interactive(message_id, card)
+                return message_id_from_result(result) or message_id
+            if action == 'reply':
+                result = self.feishu.reply_interactive(
+                    str(payload.get('source_message_id') or ''),
+                    card,
+                    reply_in_thread=bool(payload.get('reply_in_thread')),
+                )
+            else:
+                result = self.feishu.send_interactive(str(payload.get('chat_id') or ''), card)
+            return message_id_from_result(result) or message_id
+
+        if item.kind == 'final_reply':
+            text = str(payload.get('text') or '')
+            if self.dry_send:
+                print(text)
+                return ''
+            width_mode = final_message_card_width_mode(text)
+            session_kind = str(payload.get('session_kind') or '')
+            if session_kind in {'main', 'schedule'}:
+                result = self.feishu.send_markdown(str(payload.get('chat_id') or ''), text, width_mode=width_mode)
+            else:
+                result = self.feishu.reply_markdown(
+                    str(payload.get('source_message_id') or ''),
+                    text,
+                    reply_in_thread=bool(payload.get('reply_in_thread')),
+                    width_mode=width_mode,
+                )
+            return message_id_from_result(result)
+
+        raise ValueError(f'unknown Feishu outbox kind: {item.kind}')
+
+    def _load_run_view(self, run_id: int) -> RunView | None:
+        run = self.registry.get_run(run_id)
+        if run is None:
+            return None
+        session = self.registry.get_session(run.session_id)
+        if session is None:
+            return None
+        iterations, running_tools, tool_details, model_outputs = self._project_run_events(
+            self.registry.list_run_events(run_id)
+        )
+        return RunView(
+            run=run,
+            session=session,
+            iterations=iterations,
+            running_tools=running_tools,
+            tool_details=tool_details,
+            model_outputs=model_outputs,
+        )
+
+    @staticmethod
+    def _project_run_events(
+        events: list[RunEvent],
+    ) -> tuple[list[RunIteration], dict[str, str], list[str], list[str]]:
+        iterations: list[RunIteration] = []
+        running_tools: dict[str, str] = {}
+        tool_details: list[str] = []
+        model_outputs: list[str] = []
+
+        def current_iteration() -> RunIteration:
+            if not iterations:
+                iterations.append(RunIteration(message='准备中', phase='system'))
+            return iterations[-1]
+
+        for event in events:
+            payload = event.payload
+            if event.event_type == 'agent_message':
+                text = str(payload.get('text') or '').strip()
+                if text:
+                    iterations.append(RunIteration(message=text, phase=str(payload.get('phase') or 'commentary')))
+                    model_outputs.append(text)
+            elif event.event_type == 'tool_started':
+                tool = str(payload.get('tool') or 'Tool')
+                item_id = str(payload.get('item_id') or '')
+                detail = str(payload.get('detail') or '')
+                iteration = current_iteration()
+                iteration.tool_counts[tool] = iteration.tool_counts.get(tool, 0) + 1
+                if item_id:
+                    running_tools[item_id] = tool
+                    iteration.running_tools[tool] = iteration.running_tools.get(tool, 0) + 1
+                if detail:
+                    tool_detail = f'{tool}: {detail}'
+                    iteration.tool_details.append(tool_detail)
+                    tool_details.append(compact(tool_detail, 220))
+                    tool_details = tool_details[-80:]
+            elif event.event_type == 'tool_completed':
+                item_id = str(payload.get('item_id') or '')
+                tool = running_tools.pop(item_id, '') if item_id else ''
+                if not tool:
+                    continue
+                for iteration in reversed(iterations):
+                    if iteration.running_tools.get(tool, 0) > 0:
+                        iteration.running_tools[tool] -= 1
+                        if iteration.running_tools[tool] <= 0:
+                            iteration.running_tools.pop(tool, None)
+                        if payload.get('failed'):
+                            iteration.failed_tool_counts[tool] = iteration.failed_tool_counts.get(tool, 0) + 1
+                        break
+        return iterations, running_tools, tool_details, model_outputs
+
+    def _last_model_output(self, run_id: int) -> str:
+        for event in reversed(self.registry.list_run_events(run_id)):
+            if event.event_type == 'agent_message':
+                return str(event.payload.get('text') or '').strip()
+        return ''
+
+    def _format_status_text(self, active: RunView) -> str:
         elapsed = self._elapsed_seconds(active)
         lines = [
-            f'Codex {self._phase_label(active.status_phase)}: {active.status}',
+            f'Codex {self._phase_label(active.run.status_phase)}: {active.run.status}',
             self._run_line(active, elapsed),
             self._toggle_state_line(active),
         ]
-        if active.status_phase == 'failed' and active.error_detail:
-            lines.append(f'错误信息: {compact(active.error_detail, 1200)}')
+        if active.run.status_phase == 'failed' and active.run.error:
+            lines.append(f'错误信息: {compact(active.run.error, 1200)}')
         iterations = self._visible_iterations(active)
         offset = max(0, len(active.iterations) - len(iterations))
         for index, iteration in enumerate(iterations, start=offset + 1):
             lines.extend(self._iteration_lines(active, index, iteration))
         return '\n'.join(lines)
 
-    def _build_status_card(self, active: ActiveRun) -> dict[str, Any]:
+    def _build_status_card(self, active: RunView) -> dict[str, Any]:
         elapsed = self._elapsed_seconds(active)
         template = {
             'running': 'blue',
             'done': 'green',
             'stopped': 'orange',
             'failed': 'red',
-        }.get(active.status_phase, 'blue')
+        }.get(active.run.status_phase, 'blue')
         title = status_title(active)
 
         return {
@@ -798,19 +1040,19 @@ class AgentDaemon:
             ],
         }
 
-    def _run_line(self, active: ActiveRun, elapsed: int) -> str:
-        return f'{session_label(active.session)} · {active.host} · {active.session.cwd} · {format_elapsed(elapsed)}'
+    def _run_line(self, active: RunView, elapsed: int) -> str:
+        return f'{session_label(active.session)} · {active.run.host} · {active.session.cwd} · {format_elapsed(elapsed)}'
 
-    def _view_elements(self, active: ActiveRun) -> list[dict[str, Any]]:
+    def _view_elements(self, active: RunView) -> list[dict[str, Any]]:
         return [{'tag': 'div', 'text': {'tag': 'lark_md', 'content': self._iterations_view(active)}}]
 
-    def _error_elements(self, active: ActiveRun) -> list[dict[str, Any]]:
-        if active.status_phase != 'failed' or not active.error_detail:
+    def _error_elements(self, active: RunView) -> list[dict[str, Any]]:
+        if active.run.status_phase != 'failed' or not active.run.error:
             return []
-        content = '**错误信息**\n' + escape_lark_md(compact(active.error_detail, 1800))
+        content = '**错误信息**\n' + escape_lark_md(compact(active.run.error, 1800))
         return [{'tag': 'div', 'text': {'tag': 'lark_md', 'content': content}}]
 
-    def _iterations_view(self, active: ActiveRun) -> str:
+    def _iterations_view(self, active: RunView) -> str:
         iterations = self._visible_iterations(active)
         if not iterations:
             return '等待 Codex 产生可见输出。'
@@ -823,7 +1065,7 @@ class AgentDaemon:
             lines.append(f'已隐藏更早 {len(active.iterations) - len(iterations)} 步，点“早期：隐藏”切换。')
         return '\n'.join(lines)
 
-    def _tools_view(self, active: ActiveRun) -> str:
+    def _tools_view(self, active: RunView) -> str:
         totals: dict[str, int] = {}
         failures: dict[str, int] = {}
         for iteration in active.iterations:
@@ -850,7 +1092,7 @@ class AgentDaemon:
             lines.append('还没有工具调用。')
         return '\n'.join(lines)
 
-    def _output_view(self, active: ActiveRun) -> str:
+    def _output_view(self, active: RunView) -> str:
         if not active.model_outputs:
             return '**模型输出**\n还没有模型输出。'
         parts = []
@@ -858,48 +1100,48 @@ class AgentDaemon:
             parts.append(f'{index}. {escape_lark_md(compact(text, 500))}')
         return '**模型输出**\n' + '\n\n'.join(parts)
 
-    def _visible_iterations(self, active: ActiveRun) -> list[RunIteration]:
-        if active.hide_early_iterations:
+    def _visible_iterations(self, active: RunView) -> list[RunIteration]:
+        if active.run.hide_early_iterations:
             return active.iterations[-6:]
         return active.iterations
 
-    def _iteration_lines(self, active: ActiveRun, index: int, iteration: RunIteration) -> list[str]:
+    def _iteration_lines(self, active: RunView, index: int, iteration: RunIteration) -> list[str]:
         message = self._display_text(active, iteration.message, truncated_limit=150, expanded_limit=4000)
         lines = [f'{index}. 💬 {escape_lark_md(message)}']
         tools = format_tool_counts(iteration)
         if tools:
             lines.append(f'   🛠 {escape_lark_md(tools)}')
-        if active.show_tool_details and iteration.tool_details:
+        if active.run.show_tool_details and iteration.tool_details:
             for detail in iteration.tool_details:
                 text = self._display_text(active, detail, truncated_limit=180, expanded_limit=4000)
                 lines.append(f'   🔧 {escape_lark_md(text)}')
         return lines
 
     @staticmethod
-    def _display_text(active: ActiveRun, text: object, *, truncated_limit: int, expanded_limit: int) -> str:
-        return compact(text, truncated_limit if active.truncate_content else expanded_limit)
+    def _display_text(active: RunView, text: object, *, truncated_limit: int, expanded_limit: int) -> str:
+        return compact(text, truncated_limit if active.run.truncate_content else expanded_limit)
 
     @staticmethod
-    def _elapsed_seconds(active: ActiveRun) -> int:
-        end = active.finished_at if active.finished_at is not None else time.time()
-        return max(0, int(end - active.started_at))
+    def _elapsed_seconds(active: RunView) -> int:
+        end = active.run.finished_at if active.run.finished_at is not None else int(time.time())
+        return max(0, int(end - active.run.started_at))
 
     @staticmethod
-    def _toggle_state_line(active: ActiveRun) -> str:
-        early = '隐藏' if active.hide_early_iterations else '显示'
-        tools = '展开' if active.show_tool_details else '摘要'
-        truncate = '开' if active.truncate_content else '关'
+    def _toggle_state_line(active: RunView) -> str:
+        early = '隐藏' if active.run.hide_early_iterations else '显示'
+        tools = '展开' if active.run.show_tool_details else '摘要'
+        truncate = '开' if active.run.truncate_content else '关'
         return f'早期：{early} · 工具：{tools} · 截断：{truncate}'
 
-    def _card_actions(self, active: ActiveRun) -> list[dict[str, Any]]:
+    def _card_actions(self, active: RunView) -> list[dict[str, Any]]:
         actions: list[tuple[str, str, str]] = []
-        if active.status_phase == 'running':
+        if active.run.status_phase == 'running':
             actions.append(('停止', 'danger', 'stop'))
         actions.extend(
             [
-                (f'早期：{"隐藏" if active.hide_early_iterations else "显示"}', 'default', 'toggle_early'),
-                (f'工具：{"展开" if active.show_tool_details else "摘要"}', 'default', 'toggle_tools'),
-                (f'截断：{"开" if active.truncate_content else "关"}', 'default', 'toggle_truncate'),
+                (f'早期：{"隐藏" if active.run.hide_early_iterations else "显示"}', 'default', 'toggle_early'),
+                (f'工具：{"展开" if active.run.show_tool_details else "摘要"}', 'default', 'toggle_tools'),
+                (f'截断：{"开" if active.run.truncate_content else "关"}', 'default', 'toggle_truncate'),
             ]
         )
         return [
@@ -910,7 +1152,7 @@ class AgentDaemon:
                 'value': {
                     'action': action,
                     'session_id': active.session.id,
-                    'message_id': active.status_message_id,
+                    'message_id': active.run.status_message_id,
                     'chat_id': active.session.chat_id,
                 },
             }
@@ -935,18 +1177,20 @@ class AgentDaemon:
             'output': '模型输出',
         }.get(view, view)
 
-    @staticmethod
-    def _handle_legacy_view_action(active: ActiveRun, view: str) -> None:
+    def _handle_legacy_view_action(self, run_id: int, view: str) -> None:
         if view == 'live':
-            active.hide_early_iterations = True
-            active.show_tool_details = False
-            active.truncate_content = True
+            self.registry.update_run(
+                run_id,
+                hide_early_iterations=True,
+                show_tool_details=False,
+                truncate_content=True,
+            )
         elif view == 'history':
-            active.hide_early_iterations = False
+            self.registry.update_run(run_id, hide_early_iterations=False)
         elif view == 'tools':
-            active.show_tool_details = True
+            self.registry.update_run(run_id, show_tool_details=True)
         elif view == 'output':
-            active.truncate_content = False
+            self.registry.update_run(run_id, truncate_content=False)
 
     def _message_allowed(self, message: IncomingMessage) -> bool:
         if self.config.feishu.ignore_bot_messages and message.sender_type == 'app':
@@ -1027,7 +1271,7 @@ class AgentDaemon:
             'Agentd contract:',
             '- Agentd sends your final answer back to Feishu. Do not call Feishu send/reply commands yourself unless the user explicitly asks you to send an additional proactive message.',
             '- For agentd service status, logs, health checks, start, stop, or restart, use `"$AGENTD_CLI" service ...`.',
-            '- If restarting agentd from inside this Feishu-managed turn, use `"$AGENTD_CLI" service restart --defer 10`; the daemon records the request and applies it after active runs finish.',
+            '- Agentd persists run, card, and final-reply state across restarts. Use `"$AGENTD_CLI" service restart --defer 10` when you want to avoid interrupting the current turn.',
             '- If you will handle substantial work in this session, set a concise task title once early with `"$AGENTD_CLI" set-title "<title>"`.',
             '- If you delegate, do not call `set-title` in the parent session. Run `"$AGENTD_CLI" spawn-child --cwd <dir> --title <short title> [--profile <profile>] [--skills a,b]` with the full child task piped on stdin, then stop without sending a final answer.',
             '- Example delegation command: `printf %s "$child_task" | "$AGENTD_CLI" spawn-child --cwd /path/to/work --title "short title" --skills bookkeeping,calendar`.',
@@ -1043,17 +1287,22 @@ class AgentDaemon:
         return '\n'.join(lines)
 
     def _codex_extra_env(self, active: ActiveRun) -> dict[str, str]:
+        run = self.registry.get_run(active.run_id)
+        source_message_id = run.source_message_id if run else ''
+        status_message_id = run.status_message_id if run else ''
+        context_profile = run.context_profile if run else ''
+        context_skills = run.skills if run else ()
         return {
             'AGENTD_CLI': str(self.config.executable),
             'AGENTD_CONFIG': str(self.config.config_path),
             'AGENTD_SESSION_ID': str(active.session.id),
             'AGENTD_CHAT_ID': active.session.chat_id,
-            'AGENTD_SOURCE_MESSAGE_ID': active.source_message_id,
-            'AGENTD_STATUS_MESSAGE_ID': active.status_message_id,
+            'AGENTD_SOURCE_MESSAGE_ID': source_message_id,
+            'AGENTD_STATUS_MESSAGE_ID': status_message_id,
             'AGENTD_SESSION_KIND': active.session.kind,
             'AGENTD_CWD': active.session.cwd,
-            'AGENTD_CONTEXT_PROFILE': active.context_profile,
-            'AGENTD_CONTEXT_SKILLS': ','.join(active.context_skills),
+            'AGENTD_CONTEXT_PROFILE': context_profile,
+            'AGENTD_CONTEXT_SKILLS': ','.join(context_skills),
             'AGENTD_MEMORY_DIR': str(self.context_resolver.memory_dir),
         }
 
@@ -1080,9 +1329,9 @@ def session_label(session: AgentSession) -> str:
     return session.kind or '会话'
 
 
-def status_title(active: ActiveRun) -> str:
+def status_title(active: RunView) -> str:
     icon = '🌿' if active.session.kind == 'child' else '🧵'
-    title = active.display_title or ('子任务' if active.session.kind == 'child' else '主任务')
+    title = active.run.display_title or ('子任务' if active.session.kind == 'child' else '主任务')
     return f'{icon} {normalize_title(title, fallback="任务")}'
 
 

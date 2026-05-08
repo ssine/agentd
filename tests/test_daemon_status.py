@@ -3,32 +3,60 @@ from __future__ import annotations
 import json
 import unittest
 
-from agentd.codex_app_server import CodexRunControl
-from agentd.daemon import ActiveRun, AgentDaemon
-from agentd.models import AgentSession
+from agentd.daemon import AgentDaemon, RunView
+from agentd.models import AgentSession, RunRecord
 
 
 class DaemonStatusCardTest(unittest.TestCase):
     def test_failed_status_card_includes_error_detail(self) -> None:
         daemon = object.__new__(AgentDaemon)
-        active = ActiveRun(
-            session=AgentSession(
-                id=1,
-                kind='main',
-                chat_id='chat',
-                thread_id=None,
-                root_message_id=None,
-                codex_thread_id='thread',
-                cwd='/workspace',
-            ),
+        session = AgentSession(
+            id=1,
+            kind='main',
+            chat_id='chat',
+            thread_id=None,
+            root_message_id=None,
+            codex_thread_id='thread',
+            cwd='/workspace',
+        )
+        run = RunRecord(
+            id=1,
+            session_id=session.id,
             source_message_id='message',
-            control=CodexRunControl(),
+            prompt='hello',
+            state='failed',
+            status_phase='failed',
+            status='失败: systemError',
+            status_message_id='status-message',
+            codex_thread_id='thread',
+            turn_id='turn',
+            subject='Codex',
+            display_title='Status test',
             host='host',
+            status_reply_in_thread=False,
+            context_profile='default',
+            skills=(),
+            hide_early_iterations=True,
+            show_tool_details=False,
+            truncate_content=True,
+            final_message_text='',
+            final_message_sent_at=None,
+            error='upstream returned 500: model overloaded',
+            handoff_child_session_id=None,
             started_at=100,
             finished_at=110,
-            status='失败: systemError',
-            status_phase='failed',
-            error_detail='upstream returned 500: model overloaded',
+            heartbeat_at=100,
+            lease_until=130,
+            created_at=100,
+            updated_at=110,
+        )
+        active = RunView(
+            run=run,
+            session=session,
+            iterations=[],
+            running_tools={},
+            tool_details=[],
+            model_outputs=[],
         )
 
         status_text = daemon._format_status_text(active)

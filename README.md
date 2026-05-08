@@ -56,7 +56,7 @@ uv run agentd --config ~/.agentd/agentd.toml config-check
 
 Agentd-owned runtime state is stored under the configured `state_dir`:
 
-- `agentd.sqlite`: Feishu chat/thread to Codex thread registry.
+- `agentd.sqlite`: Feishu chat/thread registry, durable run/event state, card projections, and Feishu outbox.
 - `agentd.pid`: pid for the fallback process supervisor.
 - `logs/`: per-turn Codex app-server JSON-RPC logs.
 - `logs/agentd-service.log`: stdout/stderr for the fallback process supervisor.
@@ -126,7 +126,9 @@ Restart=always
 RestartSec=3
 ```
 
-Use `--defer` when a restart is requested from inside a Feishu-managed Codex turn:
+Agentd persists run state, Codex events, Feishu card projections, and final-reply outbox records in SQLite.
+After a restart it reconciles pending card/final-message updates and marks any leased in-flight Codex turn it
+can no longer control as interrupted. Use `--defer` when you want to avoid interrupting an active turn:
 
 ```bash
 uv run agentd service restart --defer 10

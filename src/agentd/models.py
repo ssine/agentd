@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -34,6 +35,63 @@ class AgentSession:
     cwd: str
     context_profile: str = ''
     skills: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class RunRecord:
+    id: int
+    session_id: int
+    source_message_id: str
+    prompt: str
+    state: str
+    status_phase: str
+    status: str
+    status_message_id: str
+    codex_thread_id: str
+    turn_id: str
+    subject: str
+    display_title: str
+    host: str
+    status_reply_in_thread: bool
+    context_profile: str
+    skills: tuple[str, ...]
+    hide_early_iterations: bool
+    show_tool_details: bool
+    truncate_content: bool
+    final_message_text: str
+    final_message_sent_at: int | None
+    error: str
+    handoff_child_session_id: int | None
+    started_at: int
+    finished_at: int | None
+    heartbeat_at: int
+    lease_until: int
+    created_at: int
+    updated_at: int
+
+
+@dataclass(frozen=True)
+class RunEvent:
+    id: int
+    run_id: int
+    event_type: str
+    payload: dict[str, Any]
+    created_at: int
+
+
+@dataclass(frozen=True)
+class FeishuOutboxItem:
+    id: int
+    run_id: int | None
+    kind: str
+    dedupe_key: str
+    payload: dict[str, Any]
+    state: str
+    attempts: int
+    last_error: str
+    created_at: int
+    updated_at: int
+    sent_at: int | None
 
 
 @dataclass(frozen=True)
