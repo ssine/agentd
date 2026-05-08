@@ -45,7 +45,8 @@ Important path defaults:
 ```bash
 uv run agentd config-check
 uv run agentd simulate-message --chat-id local-p2p 'Reply exactly with: pong'
-uv run agentd serve
+uv run agentd serve # also starts the local web gateway when [web].enabled = true
+uv run agentd web --host 127.0.0.1 --port 8765
 ```
 
 Use a config outside this repository with `--config`:
@@ -90,6 +91,21 @@ metrics = true
 ```
 
 When enabled, `agentd` starts a loopback OTLP/HTTP receiver for the Codex app-server process and injects Codex `[otel]` overrides pointing at that receiver. Exports are stored under `state_dir/captures/otel/` and indexed in `agentd.sqlite` table `otel_exports`. `protocol = "json"` writes OTLP JSON Lines files (`.otlp.jsonl`) for direct offline analysis; `protocol = "binary"` writes OTLP protobuf payloads (`.otlp.pb`) for compact archival and replay through OTLP tooling. `log_user_prompt` stays false by default, matching Codex's privacy-oriented default.
+
+## Web Gateway
+
+`agentd web` starts a local chat gateway that uses the same durable sessions and Codex runner without requiring Feishu credentials. The page lists recent runs, lets you send messages from a browser, and visualizes captured Responses API calls as a deduplicated request tree. Model/status/token metadata is shown on tree nodes when `codex.capture.enabled = true` and capture files are available.
+
+When running `agentd serve`, the web gateway starts automatically by default:
+
+```toml
+[web]
+enabled = true
+host = "127.0.0.1"
+port = 8765
+```
+
+Keep it on localhost unless an authenticated reverse proxy is in front of it.
 
 ## Context
 

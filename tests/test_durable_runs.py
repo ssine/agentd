@@ -4,12 +4,14 @@ import tempfile
 import time
 import unittest
 from contextlib import redirect_stdout
+from dataclasses import replace
 from io import StringIO
 from pathlib import Path
 
-from agentd.config import AgentdConfig, CodexConfig, FeishuConfig
+from agentd.codex_app_server import CodexRunControl
+from agentd.config import AgentdConfig, CodexConfig, FeishuConfig, WebConfig
 from agentd.context import ContextConfig, ContextProfile
-from agentd.daemon import AgentDaemon
+from agentd.daemon import ActiveRun, AgentDaemon
 from agentd.registry import Registry
 from agentd.schedule import ScheduleConfig
 
@@ -133,6 +135,51 @@ class DurableRunProjectionTest(unittest.TestCase):
             assert projected is not None
             self.assertEqual(projected.status_message_id, 'dry-run-status')
 
+    def test_web_run_does_not_enqueue_feishu_outbox(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_dir:
+            root = Path(raw_dir)
+            config = make_config(root)
+            daemon = AgentDaemon(config, dry_send=False)
+            session = daemon.registry.get_main_session('web', str(root))
+            run = daemon.registry.create_run(
+                session_id=session.id,
+                source_message_id='web-1',
+                prompt='hello',
+                host='host-a',
+                subject='Codex',
+                display_title='Web run',
+            )
+            active = ActiveRun(run_id=run.id, session=session, control=CodexRunControl())
+
+            self.assertTrue(daemon._queue_final_once(active, 'done'))
+            daemon._publish_status(active, force=True, create=True)
+
+            self.assertEqual(daemon.registry.claim_pending_outbox(), [])
+            updated = daemon.registry.get_run(run.id)
+            self.assertIsNotNone(updated)
+            assert updated is not None
+            self.assertEqual(updated.final_message_text, 'done')
+
+    def test_web_gateway_starts_when_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_dir:
+            root = Path(raw_dir)
+            config = replace(
+                make_config(root),
+                web=WebConfig(enabled=True, host='127.0.0.1', port=0),
+            )
+            daemon = AgentDaemon(config, dry_send=True)
+
+            daemon._ensure_web_gateway()
+
+            gateway = daemon._web_gateway
+            self.assertIsNotNone(gateway)
+            assert gateway is not None
+            self.assertIsNotNone(gateway.server)
+            assert gateway.server is not None
+            self.assertGreater(gateway.server.server_address[1], 0)
+            gateway.server.shutdown()
+            gateway.server.server_close()
+
 
 def make_config(root: Path) -> AgentdConfig:
     context = ContextConfig(
@@ -152,6 +199,7 @@ def make_config(root: Path) -> AgentdConfig:
         context=context,
         schedules=ScheduleConfig(path=root / 'schedules.toml', jobs=()),
         feishu=FeishuConfig(),
+        web=WebConfig(enabled=False),
         codex=CodexConfig(command='codex'),
     )
 
