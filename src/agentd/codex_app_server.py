@@ -28,6 +28,11 @@ class CodexAppServerError(RuntimeError):
 
 
 CodexEventSink = Callable[[dict[str, Any]], None]
+DISABLE_CODEX_MULTI_AGENT_OVERRIDE = 'features.multi_agent=false'
+
+
+def codex_app_server_config_overrides(config_overrides: list[str] | None = None) -> list[str]:
+    return [*list(config_overrides or []), DISABLE_CODEX_MULTI_AGENT_OVERRIDE]
 
 
 class CodexRunControl:
@@ -132,7 +137,7 @@ class CodexAppServer:
             env.update(extra_env)
         capture_proxy: CaptureProxy | None = None
         otel_capture: OtelCaptureServer | None = None
-        active_overrides = list(config_overrides or [])
+        active_overrides = codex_app_server_config_overrides(config_overrides)
         model_provider_override = ''
         responses_metadata: dict[str, str] | None = None
         if self.config.otel.enabled:

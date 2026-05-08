@@ -4,11 +4,16 @@ import unittest
 from types import SimpleNamespace
 
 from agentd.capture_proxy import CAPTURE_PROVIDER_ID
-from agentd.codex_app_server import CodexAppServer
+from agentd.codex_app_server import CodexAppServer, codex_app_server_config_overrides
 from agentd.models import AgentSession
 
 
 class ResumeThreadTest(unittest.TestCase):
+    def test_default_config_overrides_disable_codex_multi_agent(self) -> None:
+        overrides = codex_app_server_config_overrides(['skills.config=[]'])
+
+        self.assertEqual(overrides, ['skills.config=[]', 'features.multi_agent=false'])
+
     def test_resume_thread_does_not_require_experimental_exclude_turns(self) -> None:
         server = RecordingCodexAppServer()
         session = AgentSession(
