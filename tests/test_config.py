@@ -134,6 +134,17 @@ class ConfigTest(unittest.TestCase):
                         'archive_format = "tar.zst"',
                         'zstd_level = 12',
                         '',
+                        '[codex.otel]',
+                        'enabled = true',
+                        'environment = "local"',
+                        'protocol = "json"',
+                        'log_user_prompt = true',
+                        'logs = true',
+                        'traces = false',
+                        'metrics = true',
+                        'archive_period = "day"',
+                        'zstd_level = 9',
+                        '',
                     ]
                 ),
                 encoding='utf-8',
@@ -151,6 +162,18 @@ class ConfigTest(unittest.TestCase):
             self.assertEqual(config.codex.capture.archive_period, 'month')
             self.assertEqual(config.codex.capture.archive_format, 'tar.zst')
             self.assertEqual(config.codex.capture.zstd_level, 12)
+            self.assertTrue(config.codex.otel.enabled)
+            self.assertEqual(config.codex.otel.capture_dir, home / 'state' / 'captures')
+            self.assertEqual(config.codex.otel.db_path, home / 'state' / 'agentd.sqlite')
+            self.assertEqual(config.codex.otel.environment, 'local')
+            self.assertEqual(config.codex.otel.protocol, 'json')
+            self.assertTrue(config.codex.otel.log_user_prompt)
+            self.assertTrue(config.codex.otel.logs)
+            self.assertFalse(config.codex.otel.traces)
+            self.assertTrue(config.codex.otel.metrics)
+            self.assertEqual(config.codex.otel.archive_period, 'day')
+            self.assertEqual(config.codex.otel.archive_format, 'tar.zst')
+            self.assertEqual(config.codex.otel.zstd_level, 9)
 
 
 if __name__ == '__main__':

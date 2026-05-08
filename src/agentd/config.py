@@ -42,6 +42,22 @@ class CodexCaptureConfig:
 
 
 @dataclass(frozen=True)
+class CodexOtelConfig:
+    enabled: bool = False
+    capture_dir: Path = Path()
+    db_path: Path = Path()
+    environment: str = 'agentd'
+    protocol: str = 'json'
+    log_user_prompt: bool = False
+    logs: bool = True
+    traces: bool = True
+    metrics: bool = True
+    archive_period: str = 'week'
+    archive_format: str = 'tar.zst'
+    zstd_level: int = 10
+
+
+@dataclass(frozen=True)
 class CodexConfig:
     command: str = ''
     model: str = ''
@@ -51,6 +67,7 @@ class CodexConfig:
     turn_timeout_seconds: int = 1800
     startup_timeout_seconds: int = 60
     capture: CodexCaptureConfig = field(default_factory=CodexCaptureConfig)
+    otel: CodexOtelConfig = field(default_factory=CodexOtelConfig)
 
 
 @dataclass(frozen=True)
@@ -149,6 +166,13 @@ def _zstd_level(value: Any) -> int:
     return level
 
 
+def _otel_protocol(value: Any) -> str:
+    protocol = str(value or 'json').strip().lower()
+    if protocol not in {'json', 'binary'}:
+        raise ValueError('codex.otel.protocol must be json or binary')
+    return protocol
+
+
 def _command(value: Any, base: Path) -> str:
     raw = str(value or 'codex')
     parts = shlex.split(raw)
@@ -175,6 +199,7 @@ def load_config(path: str | Path | None = None) -> AgentdConfig:
     feishu_raw = raw.get('feishu') if isinstance(raw.get('feishu'), dict) else {}
     codex_raw = raw.get('codex') if isinstance(raw.get('codex'), dict) else {}
     codex_capture_raw = codex_raw.get('capture') if isinstance(codex_raw.get('capture'), dict) else {}
+    codex_otel_raw = codex_raw.get('otel') if isinstance(codex_raw.get('otel'), dict) else {}
 
     home_dir = _as_path(agentd_raw.get('home_dir') or config_path.parent, config_path.parent)
     source_dir = (
@@ -229,6 +254,18 @@ def load_config(path: str | Path | None = None) -> AgentdConfig:
         state_dir,
     )
     capture_db_path = _as_path(codex_capture_raw.get('db_path') or state_dir / 'agentd.sqlite', state_dir)
+    otel_capture_dir = _as_path(
+        codex_otel_raw.get('dir')
+        or codex_otel_raw.get('capture_dir')
+        or codex_capture_raw.get('dir')
+        or codex_capture_raw.get('capture_dir')
+        or 'captures',
+        state_dir,
+    )
+    otel_db_path = _as_path(codex_otel_raw.get('db_path') or capture_db_path, state_dir)
+    capture_archive_period = _capture_archive_period(codex_capture_raw.get('archive_period'))
+    capture_archive_format = _capture_archive_format(codex_capture_raw.get('archive_format'))
+    capture_zstd_level = _zstd_level(codex_capture_raw.get('zstd_level'))
     codex = CodexConfig(
         command=_command(codex_raw.get('command'), source_dir),
         model=str(codex_raw.get('model') or ''),
@@ -244,9 +281,23 @@ def load_config(path: str | Path | None = None) -> AgentdConfig:
             capture_dir=capture_dir,
             db_path=capture_db_path,
             save_sensitive_headers=bool(codex_capture_raw.get('save_sensitive_headers', False)),
-            archive_period=_capture_archive_period(codex_capture_raw.get('archive_period')),
-            archive_format=_capture_archive_format(codex_capture_raw.get('archive_format')),
-            zstd_level=_zstd_level(codex_capture_raw.get('zstd_level')),
+            archive_period=capture_archive_period,
+            archive_format=capture_archive_format,
+            zstd_level=capture_zstd_level,
+        ),
+        otel=CodexOtelConfig(
+            enabled=bool(codex_otel_raw.get('enabled', False)),
+            capture_dir=otel_capture_dir,
+            db_path=otel_db_path,
+            environment=str(codex_otel_raw.get('environment') or 'agentd'),
+            protocol=_otel_protocol(codex_otel_raw.get('protocol')),
+            log_user_prompt=bool(codex_otel_raw.get('log_user_prompt', False)),
+            logs=bool(codex_otel_raw.get('logs', True)),
+            traces=bool(codex_otel_raw.get('traces', True)),
+            metrics=bool(codex_otel_raw.get('metrics', True)),
+            archive_period=_capture_archive_period(codex_otel_raw.get('archive_period') or capture_archive_period),
+            archive_format=_capture_archive_format(codex_otel_raw.get('archive_format') or capture_archive_format),
+            zstd_level=_zstd_level(codex_otel_raw.get('zstd_level') or capture_zstd_level),
         ),
     )
 

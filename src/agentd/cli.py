@@ -168,6 +168,17 @@ def config_check(config: AgentdConfig) -> int:
     print(f'codex_capture_upstream_mode={config.codex.capture.upstream_mode}')
     if config.codex.capture.upstream_url:
         print(f'codex_capture_upstream_url={config.codex.capture.upstream_url}')
+    print(f'codex_otel_enabled={config.codex.otel.enabled}')
+    print(f'codex_otel_dir={config.codex.otel.capture_dir}')
+    print(f'codex_otel_environment={config.codex.otel.environment}')
+    print(f'codex_otel_protocol={config.codex.otel.protocol}')
+    print(f'codex_otel_log_user_prompt={config.codex.otel.log_user_prompt}')
+    print(f'codex_otel_logs={config.codex.otel.logs}')
+    print(f'codex_otel_traces={config.codex.otel.traces}')
+    print(f'codex_otel_metrics={config.codex.otel.metrics}')
+    print(f'codex_otel_archive_period={config.codex.otel.archive_period}')
+    print(f'codex_otel_archive_format={config.codex.otel.archive_format}')
+    print(f'codex_otel_zstd_level={config.codex.otel.zstd_level}')
     if missing:
         print(f'missing={",".join(missing)}')
         return 2

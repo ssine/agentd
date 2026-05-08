@@ -45,3 +45,17 @@ save_sensitive_headers = false
 archive_period = "week" # day, week, or month
 archive_format = "tar.zst"
 zstd_level = 10
+
+[codex.otel]
+# Capture Codex OpenTelemetry exports locally next to codex.capture artifacts.
+enabled = false
+environment = "agentd"
+protocol = "json" # json is easier to analyze later; binary preserves OTLP protobuf payloads.
+log_user_prompt = false
+logs = true
+traces = true
+metrics = true
+# Defaults below inherit codex.capture when omitted.
+archive_period = "week" # day, week, or month
+archive_format = "tar.zst"
+zstd_level = 10

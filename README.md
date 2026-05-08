@@ -61,6 +61,7 @@ Agentd-owned runtime state is stored under the configured `state_dir`:
 - `logs/`: per-turn Codex app-server JSON-RPC logs.
 - `logs/agentd-service.log`: stdout/stderr for the fallback process supervisor.
 - `captures/responses/`: raw Responses API captures when `codex.capture.enabled = true`; the current archive period stays as loose `.http` files and completed periods are compacted into `.tar.zst`.
+- `captures/otel/`: Codex OpenTelemetry exports when `codex.otel.enabled = true`; OTLP JSON is stored as `.otlp.jsonl`, OTLP protobuf as `.otlp.pb`, and completed periods are compacted into `.tar.zst`.
 
 Optional Codex Responses capture:
 
@@ -74,6 +75,21 @@ zstd_level = 10
 ```
 
 When enabled, `agentd` injects a temporary local model provider for the Codex app-server process and records final `POST /v1/responses` request/response exchanges under `state_dir`. Each live exchange is stored as one request `.http` and one response `.http` file under the current period directory, which defaults to the current ISO week. On startup and new captures, older period directories are archived as a single `tar.zst` while the SQLite index keeps the exchange metadata and archive member names. The proxy only handles the model provider endpoint; it does not change `chatgpt_base_url` or set global proxy environment variables.
+
+Optional local Codex OpenTelemetry capture:
+
+```toml
+[codex.otel]
+enabled = true
+environment = "agentd"
+protocol = "json"
+log_user_prompt = false
+logs = true
+traces = true
+metrics = true
+```
+
+When enabled, `agentd` starts a loopback OTLP/HTTP receiver for the Codex app-server process and injects Codex `[otel]` overrides pointing at that receiver. Exports are stored under `state_dir/captures/otel/` and indexed in `agentd.sqlite` table `otel_exports`. `protocol = "json"` writes OTLP JSON Lines files (`.otlp.jsonl`) for direct offline analysis; `protocol = "binary"` writes OTLP protobuf payloads (`.otlp.pb`) for compact archival and replay through OTLP tooling. `log_user_prompt` stays false by default, matching Codex's privacy-oriented default.
 
 ## Context
 

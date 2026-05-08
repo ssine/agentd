@@ -20,6 +20,7 @@ from .capture_proxy import (
 )
 from .config import CodexConfig
 from .models import AgentSession, CodexTurnResult
+from .otel_capture import OtelCaptureContext, OtelCaptureServer, otel_config_overrides
 
 
 class CodexAppServerError(RuntimeError):
@@ -130,9 +131,36 @@ class CodexAppServer:
         if extra_env:
             env.update(extra_env)
         capture_proxy: CaptureProxy | None = None
+        otel_capture: OtelCaptureServer | None = None
         active_overrides = list(config_overrides or [])
         model_provider_override = ''
         responses_metadata: dict[str, str] | None = None
+        if self.config.otel.enabled:
+            otel_capture = OtelCaptureServer(
+                capture_dir=self.config.otel.capture_dir,
+                db_path=self.config.otel.db_path,
+                context=OtelCaptureContext(session_id=session.id, model=self.config.model),
+                signals=enabled_otel_signals(
+                    logs=self.config.otel.logs,
+                    traces=self.config.otel.traces,
+                    metrics=self.config.otel.metrics,
+                ),
+                archive_period=self.config.otel.archive_period,
+                archive_format=self.config.otel.archive_format,
+                zstd_level=self.config.otel.zstd_level,
+            )
+            otel_capture.start()
+            active_overrides.extend(
+                otel_config_overrides(
+                    otel_capture,
+                    environment=self.config.otel.environment,
+                    protocol=self.config.otel.protocol,
+                    log_user_prompt=self.config.otel.log_user_prompt,
+                    logs=self.config.otel.logs,
+                    traces=self.config.otel.traces,
+                    metrics=self.config.otel.metrics,
+                )
+            )
         if self.config.capture.enabled:
             capture_proxy = CaptureProxy(
                 capture_dir=self.config.capture.capture_dir,
@@ -183,6 +211,8 @@ class CodexAppServer:
                             request_id=f'{session.id}:{started_at}',
                             codex_thread_id=codex_thread_id,
                         )
+                    if otel_capture:
+                        otel_capture.update_context(codex_thread_id=codex_thread_id)
                     if control:
                         control.set_thread_id(codex_thread_id)
                     self._emit(
@@ -195,6 +225,8 @@ class CodexAppServer:
                     turn_id = self._start_turn(proc, log, codex_thread_id, user_text, responses_metadata)
                     if capture_proxy:
                         capture_proxy.update_context(codex_turn_id=turn_id)
+                    if otel_capture:
+                        otel_capture.update_context(codex_turn_id=turn_id)
                     if control:
                         control.set_turn_id(turn_id)
                     self._emit(
@@ -216,6 +248,8 @@ class CodexAppServer:
         finally:
             if capture_proxy:
                 capture_proxy.stop()
+            if otel_capture:
+                otel_capture.stop()
 
     def _initialize(self, proc: subprocess.Popen[str], log: Any) -> None:
         self._request(
@@ -607,3 +641,14 @@ class CodexAppServer:
         if event_sink is None:
             return
         event_sink({'type': event_type, **data})
+
+
+def enabled_otel_signals(*, logs: bool, traces: bool, metrics: bool) -> set[str]:
+    signals: set[str] = set()
+    if logs:
+        signals.add('logs')
+    if traces:
+        signals.add('traces')
+    if metrics:
+        signals.add('metrics')
+    return signals
