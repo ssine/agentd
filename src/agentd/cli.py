@@ -76,6 +76,10 @@ def main(argv: list[str] | None = None) -> int:
     service_install.add_argument('--enable', action='store_true', help='enable unit for user login')
     service_install.add_argument('--now', action='store_true', help='restart the unit after installing')
 
+    web = sub.add_parser('web', help='start local web chat gateway')
+    web.add_argument('--host', default='127.0.0.1')
+    web.add_argument('--port', type=int, default=8765)
+
     args = parser.parse_args(argv)
     config = load_config(args.config)
     configure_logging(config.log_level)
@@ -94,6 +98,11 @@ def main(argv: list[str] | None = None) -> int:
             print(f'missing Feishu config fields: {", ".join(missing)}', file=sys.stderr)
             return 2
         AgentDaemon(config, dry_send=args.dry_send).serve()
+        return 0
+    if args.command == 'web':
+        from .web_gateway import run_web_gateway
+
+        run_web_gateway(config, host=str(args.host), port=int(args.port))
         return 0
     if args.command == 'simulate-message':
         message_id = args.message_id or f'local-{int(time.time() * 1000)}'
@@ -159,6 +168,9 @@ def config_check(config: AgentdConfig) -> int:
     print(f'schedules_jobs={len(config.schedules.jobs)}')
     print(f'feishu_app_id={"present" if config.feishu.app_id else "missing"}')
     print(f'feishu_app_secret={"present" if config.feishu.app_secret else "missing"}')
+    print(f'web_enabled={config.web.enabled}')
+    print(f'web_host={config.web.host}')
+    print(f'web_port={config.web.port}')
     print(f'codex_command={config.codex.command}')
     print(f'codex_capture_enabled={config.codex.capture.enabled}')
     print(f'codex_capture_dir={config.codex.capture.capture_dir}')

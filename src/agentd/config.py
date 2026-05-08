@@ -29,6 +29,13 @@ class FeishuConfig:
 
 
 @dataclass(frozen=True)
+class WebConfig:
+    enabled: bool = True
+    host: str = '127.0.0.1'
+    port: int = 8765
+
+
+@dataclass(frozen=True)
 class CodexCaptureConfig:
     enabled: bool = False
     upstream_mode: str = 'codex-default'
@@ -65,6 +72,7 @@ class AgentdConfig:
     context: ContextConfig
     schedules: ScheduleConfig
     feishu: FeishuConfig
+    web: WebConfig
     codex: CodexConfig
 
     @property
@@ -173,6 +181,7 @@ def load_config(path: str | Path | None = None) -> AgentdConfig:
     agentd_raw = raw.get('agentd') if isinstance(raw.get('agentd'), dict) else {}
     context_raw = raw.get('context') if isinstance(raw.get('context'), dict) else {}
     feishu_raw = raw.get('feishu') if isinstance(raw.get('feishu'), dict) else {}
+    web_raw = raw.get('web') if isinstance(raw.get('web'), dict) else {}
     codex_raw = raw.get('codex') if isinstance(raw.get('codex'), dict) else {}
     codex_capture_raw = codex_raw.get('capture') if isinstance(codex_raw.get('capture'), dict) else {}
 
@@ -223,6 +232,11 @@ def load_config(path: str | Path | None = None) -> AgentdConfig:
         main_reply_in_thread=bool(feishu_raw.get('main_reply_in_thread', False)),
         child_reply_in_thread=bool(feishu_raw.get('child_reply_in_thread', True)),
     )
+    web = WebConfig(
+        enabled=bool(web_raw.get('enabled', True)),
+        host=str(web_raw.get('host') or '127.0.0.1'),
+        port=int(web_raw.get('port') or 8765),
+    )
 
     capture_dir = _as_path(
         codex_capture_raw.get('dir') or codex_capture_raw.get('capture_dir') or 'captures',
@@ -261,5 +275,6 @@ def load_config(path: str | Path | None = None) -> AgentdConfig:
         context=context,
         schedules=schedules,
         feishu=feishu,
+        web=web,
         codex=codex,
     )

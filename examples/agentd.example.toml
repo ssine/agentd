@@ -26,6 +26,12 @@ ignore_bot_messages = true
 main_reply_in_thread = false
 child_reply_in_thread = true
 
+[web]
+# Started automatically by `agentd serve`; bind to localhost unless you add auth at a proxy.
+enabled = true
+host = "127.0.0.1"
+port = 8765
+
 [codex]
 # Defaults to "codex" if omitted. Set an absolute path or wrapper command if needed.
 command = "codex"

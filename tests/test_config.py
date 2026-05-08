@@ -125,6 +125,11 @@ class ConfigTest(unittest.TestCase):
                         f'workspace = "{workspace}"',
                         'state_dir = "state"',
                         '',
+                        '[web]',
+                        'enabled = false',
+                        'host = "0.0.0.0"',
+                        'port = 9999',
+                        '',
                         '[codex.capture]',
                         'enabled = true',
                         'upstream_mode = "chatgpt"',
@@ -142,6 +147,9 @@ class ConfigTest(unittest.TestCase):
             config = load_config(config_path)
 
             self.assertEqual(config.codex.command, 'codex')
+            self.assertFalse(config.web.enabled)
+            self.assertEqual(config.web.host, '0.0.0.0')
+            self.assertEqual(config.web.port, 9999)
             self.assertTrue(config.codex.capture.enabled)
             self.assertEqual(config.codex.capture.upstream_mode, 'chatgpt')
             self.assertEqual(config.codex.capture.upstream_url, 'https://example.test/responses')

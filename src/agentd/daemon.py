@@ -73,14 +73,38 @@ class AgentDaemon:
         self._spawn_watcher_lock = threading.Lock()
         self._scheduler_started = False
         self._scheduler_lock = threading.Lock()
+        self._web_gateway: Any | None = None
+        self._web_gateway_lock = threading.Lock()
 
     def serve(self) -> None:
         self._ensure_spawn_watcher()
         self._ensure_scheduler()
+        self._ensure_web_gateway()
         self._recover_stale_runs()
         listener = FeishuListener(self.config.feishu)
         self.log.info('starting Feishu listener')
         listener.start(self.handle_message, self.handle_card_action)
+
+    def _ensure_web_gateway(self) -> None:
+        if not self.config.web.enabled:
+            return
+        with self._web_gateway_lock:
+            if self._web_gateway is not None:
+                return
+            try:
+                from .web_gateway import WebGateway
+
+                gateway = WebGateway(
+                    self.config,
+                    host=self.config.web.host,
+                    port=self.config.web.port,
+                    daemon=self,
+                )
+                host, port = gateway.start_background()
+                self._web_gateway = gateway
+                self.log.info('started web gateway at http://%s:%s', host, port)
+            except Exception:
+                self.log.exception('failed to start web gateway')
 
     def _ensure_spawn_watcher(self) -> None:
         with self._spawn_watcher_lock:
@@ -757,6 +781,8 @@ class AgentDaemon:
         if run is None:
             return False
         self.registry.update_run(active.run_id, final_message_text=final_text)
+        if is_web_run(run):
+            return True
         self.registry.upsert_outbox(
             kind='final_reply',
             dedupe_key=f'run:{active.run_id}:final',
@@ -824,6 +850,9 @@ class AgentDaemon:
             text = self._format_status_text(view)
             card = self._build_status_card(view)
             render_hash = self._card_render_hash(card)
+            if is_web_run(run):
+                self.registry.mark_card_enqueued(run.id, render_hash=render_hash)
+                continue
             projection = self.registry.get_card_projection(run.id)
             remote_message_id = run.status_message_id
             if projection is not None and not remote_message_id:
@@ -1317,6 +1346,10 @@ def thread_id_from_result(result: dict[str, Any]) -> str:
     data = result.get('data') if isinstance(result.get('data'), dict) else result
     value = data.get('thread_id') if isinstance(data, dict) else None
     return value if isinstance(value, str) else ''
+
+
+def is_web_run(run: RunRecord) -> bool:
+    return str(run.source_message_id).startswith('web-')
 
 
 def session_label(session: AgentSession) -> str:

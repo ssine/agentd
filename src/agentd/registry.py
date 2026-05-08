@@ -519,6 +519,73 @@ class Registry:
             ).fetchall()
         return [self._run_event_from_row(row) for row in rows]
 
+    def list_sessions(self, limit: int = 100) -> list[AgentSession]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                select *
+                from sessions
+                order by updated_at desc, id desc
+                limit ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [self._session_from_row(row) for row in rows]
+
+    def list_runs(self, *, session_id: int | None = None, limit: int = 100) -> list[RunRecord]:
+        where = ''
+        params: list[object] = []
+        if session_id is not None:
+            where = 'where session_id = ?'
+            params.append(session_id)
+        params.append(limit)
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"""
+                select *
+                from runs
+                {where}
+                order by started_at desc, id desc
+                limit ?
+                """,
+                params,
+            ).fetchall()
+        return [self._run_from_row(row) for row in rows]
+
+    def list_model_http_exchanges(
+        self,
+        *,
+        session_id: int | None = None,
+        codex_thread_id: str = '',
+        limit: int = 200,
+    ) -> list[sqlite3.Row]:
+        conditions: list[str] = []
+        params: list[object] = []
+        if session_id is not None:
+            conditions.append('session_id = ?')
+            params.append(session_id)
+        if codex_thread_id:
+            conditions.append('codex_thread_id = ?')
+            params.append(codex_thread_id)
+        where = f'where {" and ".join(conditions)}' if conditions else ''
+        params.append(limit)
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"""
+                select *
+                from (
+                    select *
+                    from model_http_exchanges
+                    {where}
+                    order by created_at desc, id desc
+                    limit ?
+                )
+                order by created_at, id
+                """,
+                params,
+            ).fetchall()
+        return rows
+
     def mark_card_dirty(self, run_id: int) -> None:
         now = int(time.time())
         with self.connect() as conn:

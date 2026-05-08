@@ -45,7 +45,8 @@ Important path defaults:
 ```bash
 uv run agentd config-check
 uv run agentd simulate-message --chat-id local-p2p 'Reply exactly with: pong'
-uv run agentd serve
+uv run agentd serve # also starts the local web gateway when [web].enabled = true
+uv run agentd web --host 127.0.0.1 --port 8765
 ```
 
 Use a config outside this repository with `--config`:
@@ -74,6 +75,21 @@ zstd_level = 10
 ```
 
 When enabled, `agentd` injects a temporary local model provider for the Codex app-server process and records final `POST /v1/responses` request/response exchanges under `state_dir`. Each live exchange is stored as one request `.http` and one response `.http` file under the current period directory, which defaults to the current ISO week. On startup and new captures, older period directories are archived as a single `tar.zst` while the SQLite index keeps the exchange metadata and archive member names. The proxy only handles the model provider endpoint; it does not change `chatgpt_base_url` or set global proxy environment variables.
+
+## Web Gateway
+
+`agentd web` starts a local chat gateway that uses the same durable sessions and Codex runner without requiring Feishu credentials. The page lists recent runs, lets you send messages from a browser, and visualizes captured Responses API calls as a deduplicated request tree. Model/status/token metadata is shown on tree nodes when `codex.capture.enabled = true` and capture files are available.
+
+When running `agentd serve`, the web gateway starts automatically by default:
+
+```toml
+[web]
+enabled = true
+host = "127.0.0.1"
+port = 8765
+```
+
+Keep it on localhost unless an authenticated reverse proxy is in front of it.
 
 ## Context
 
