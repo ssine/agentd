@@ -107,7 +107,7 @@ def print_status(config: AgentdConfig, backend: str) -> int:
     print(f'backend={selected}')
     print(f'workspace={config.workspace}')
     print(f'config={config.config_path}')
-    print(f'runtime_dir={config.runtime_dir}')
+    print(f'state_dir={_state_dir(config)}')
     print(f'agentd={agentd_executable(config)}')
 
     if selected == 'systemd':
@@ -158,7 +158,7 @@ def collect_checks(config: AgentdConfig, backend: str) -> list[Check]:
     checks: list[Check] = []
     checks.append(check_path('workspace', config.workspace, must_be_dir=True))
     checks.append(check_path('config', config.config_path, must_be_file=True))
-    checks.append(check_path('runtime_dir', config.runtime_dir, must_be_dir=True, create=True))
+    checks.append(check_path('state_dir', _state_dir(config), must_be_dir=True, create=True))
     checks.append(check_path('log_dir', config.log_dir, must_be_dir=True, create=True))
     checks.append(check_executable('agentd executable', agentd_executable(config)))
     checks.append(check_command('codex command', config.codex.command))
@@ -317,7 +317,7 @@ def process_status(config: AgentdConfig) -> int:
 
 
 def start_process(config: AgentdConfig) -> int:
-    config.runtime_dir.mkdir(parents=True, exist_ok=True)
+    _state_dir(config).mkdir(parents=True, exist_ok=True)
     config.log_dir.mkdir(parents=True, exist_ok=True)
     path = pid_path(config)
     pid = read_pid(path)
@@ -472,11 +472,11 @@ def pid_started_at(pid: int) -> float:
 
 
 def deferred_service_request_path(config: AgentdConfig) -> Path:
-    return config.runtime_dir / DEFERRED_SERVICE_REQUEST_NAME
+    return _state_dir(config) / DEFERRED_SERVICE_REQUEST_NAME
 
 
 def write_deferred_service_command(config: AgentdConfig, payload: dict[str, Any]) -> None:
-    config.runtime_dir.mkdir(parents=True, exist_ok=True)
+    _state_dir(config).mkdir(parents=True, exist_ok=True)
     path = deferred_service_request_path(config)
     tmp = path.with_suffix('.tmp')
     tmp.write_text(json.dumps(payload, ensure_ascii=False) + '\n', encoding='utf-8')
@@ -542,11 +542,19 @@ def agentd_executable(config: AgentdConfig) -> Path:
 
 
 def pid_path(config: AgentdConfig) -> Path:
-    return config.runtime_dir / 'agentd.pid'
+    return _state_dir(config) / 'agentd.pid'
 
 
 def service_log_path(config: AgentdConfig) -> Path:
     return config.log_dir / SERVICE_LOG_NAME
+
+
+def _state_dir(config: Any) -> Path:
+    try:
+        value = config.state_dir
+    except AttributeError:
+        value = config.runtime_dir
+    return Path(value)
 
 
 def read_pid(path: Path) -> int:

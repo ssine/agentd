@@ -1,15 +1,21 @@
 [agentd]
 # Path to the agentd executable used by service management.
-# Relative paths are resolved from the agentd project root.
+# Relative paths are resolved from source_dir.
 executable = ".venv/bin/agentd"
 
-# Workspace where Codex turns run. Runtime, context profile, and schedule
-# relative paths below are resolved from this workspace.
+# Source tree for agentd itself. Relative paths are resolved from this config file.
+source_dir = "/path/to/agentd"
+
+# Workspace where Codex turns run.
 workspace = "."
-runtime_dir = ".agents/runtime"
+state_dir = "state"
 log_level = "INFO"
-context_profiles = ".agents/config/context-profiles.toml"
-schedules = ".agents/config/schedules.toml"
+
+[context]
+# User-maintained context can live outside AGENTD_HOME and can be a separate git repo.
+dir = "~/agent-context"
+config = "context.toml"
+schedules = "schedules.toml"
 
 [feishu]
 # app_id and app_secret can also be supplied by environment:
@@ -29,4 +35,3 @@ sandbox = "danger-full-access"
 approval_policy = "never"
 turn_timeout_seconds = 1800
 startup_timeout_seconds = 60
-

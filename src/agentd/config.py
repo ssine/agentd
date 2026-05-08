@@ -16,7 +16,7 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10 fallback
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_CONFIG_PATH = PROJECT_ROOT / '.agents/config/agentd.toml'
+LEGACY_CONFIG_PATH = PROJECT_ROOT / '.agents/config/agentd.toml'
 
 
 @dataclass(frozen=True)
@@ -42,8 +42,10 @@ class CodexConfig:
 @dataclass(frozen=True)
 class AgentdConfig:
     config_path: Path
+    home_dir: Path
     executable: Path
-    runtime_dir: Path
+    source_dir: Path
+    state_dir: Path
     workspace: Path
     log_level: str
     context: ContextConfig
@@ -52,12 +54,33 @@ class AgentdConfig:
     codex: CodexConfig
 
     @property
+    def runtime_dir(self) -> Path:
+        return self.state_dir
+
+    @property
     def db_path(self) -> Path:
-        return self.runtime_dir / 'agentd.sqlite'
+        return self.state_dir / 'agentd.sqlite'
 
     @property
     def log_dir(self) -> Path:
-        return self.runtime_dir / 'logs'
+        return self.state_dir / 'logs'
+
+
+def default_home_dir() -> Path:
+    return Path(os.environ.get('AGENTD_HOME') or '~/.agentd').expanduser().resolve()
+
+
+def default_context_dir() -> Path:
+    return Path(os.environ.get('AGENTD_CONTEXT_HOME') or '~/agent-context').expanduser().resolve()
+
+
+def default_config_path() -> Path:
+    home_config = default_home_dir() / 'agentd.toml'
+    if home_config.exists() or os.environ.get('AGENTD_HOME'):
+        return home_config
+    if LEGACY_CONFIG_PATH.exists():
+        return LEGACY_CONFIG_PATH
+    return home_config
 
 
 def _load_toml(path: Path) -> dict[str, Any]:
@@ -101,23 +124,53 @@ def _command(value: Any, base: Path) -> str:
 
 def load_config(path: str | Path | None = None) -> AgentdConfig:
     raw_config_path = path or os.environ.get('AGENTD_CONFIG')
-    config_path = Path(raw_config_path).expanduser() if raw_config_path else DEFAULT_CONFIG_PATH
+    config_path = Path(raw_config_path).expanduser() if raw_config_path else default_config_path()
     if not config_path.is_absolute():
         config_path = ((Path.cwd() if raw_config_path else PROJECT_ROOT) / config_path).resolve()
 
     raw = _load_toml(config_path)
     agentd_raw = raw.get('agentd') if isinstance(raw.get('agentd'), dict) else {}
+    context_raw = raw.get('context') if isinstance(raw.get('context'), dict) else {}
     feishu_raw = raw.get('feishu') if isinstance(raw.get('feishu'), dict) else {}
     codex_raw = raw.get('codex') if isinstance(raw.get('codex'), dict) else {}
 
-    executable = _as_path(agentd_raw.get('executable', '.venv/bin/agentd'), PROJECT_ROOT)
-    workspace = _as_path(agentd_raw.get('workspace', '.'), PROJECT_ROOT)
-    runtime_dir = _as_path(agentd_raw.get('runtime_dir', '.agents/runtime'), workspace)
-    context_profiles_path = _as_path(
-        agentd_raw.get('context_profiles', '.agents/config/context-profiles.toml'), workspace
+    home_dir = _as_path(agentd_raw.get('home_dir') or config_path.parent, config_path.parent)
+    source_dir = (
+        _as_path(agentd_raw.get('source_dir'), config_path.parent)
+        if agentd_raw.get('source_dir') is not None
+        else PROJECT_ROOT
     )
-    schedules_path = _as_path(agentd_raw.get('schedules', '.agents/config/schedules.toml'), workspace)
-    context = load_context_config(context_profiles_path, workspace)
+    executable = _as_path(agentd_raw.get('executable', '.venv/bin/agentd'), source_dir)
+    workspace = _as_path(agentd_raw.get('workspace', '.'), source_dir)
+
+    if agentd_raw.get('state_dir') is not None:
+        state_dir = _as_path(agentd_raw.get('state_dir'), home_dir)
+    elif agentd_raw.get('runtime_dir') is not None:
+        state_dir = _as_path(agentd_raw.get('runtime_dir'), workspace)
+    else:
+        state_dir = home_dir / 'state'
+
+    context_dir = _as_path(
+        context_raw.get('context_dir')
+        or context_raw.get('dir')
+        or agentd_raw.get('context_dir')
+        or default_context_dir(),
+        home_dir,
+    )
+    if agentd_raw.get('context_profiles') is not None:
+        context_config_path = _as_path(agentd_raw.get('context_profiles'), workspace)
+        context_base = workspace
+    else:
+        context_config_path = _as_path(
+            context_raw.get('config') or context_raw.get('profiles') or 'context.toml', context_dir
+        )
+        context_base = context_dir
+    if agentd_raw.get('schedules') is not None:
+        schedules_path = _as_path(agentd_raw.get('schedules'), workspace)
+    else:
+        schedules_path = _as_path(context_raw.get('schedules') or 'schedules.toml', context_dir)
+
+    context = load_context_config(context_config_path, context_base)
     schedules = load_schedule_config(schedules_path)
 
     feishu = FeishuConfig(
@@ -130,7 +183,7 @@ def load_config(path: str | Path | None = None) -> AgentdConfig:
     )
 
     codex = CodexConfig(
-        command=_command(codex_raw.get('command'), PROJECT_ROOT),
+        command=_command(codex_raw.get('command'), source_dir),
         model=str(codex_raw.get('model') or ''),
         model_provider=str(codex_raw.get('model_provider') or ''),
         sandbox=str(codex_raw.get('sandbox') or 'danger-full-access'),
@@ -141,8 +194,10 @@ def load_config(path: str | Path | None = None) -> AgentdConfig:
 
     return AgentdConfig(
         config_path=config_path,
+        home_dir=home_dir,
         executable=executable,
-        runtime_dir=runtime_dir,
+        source_dir=source_dir,
+        state_dir=state_dir,
         workspace=workspace,
         log_level=str(agentd_raw.get('log_level') or 'INFO'),
         context=context,

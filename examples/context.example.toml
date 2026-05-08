@@ -1,9 +1,9 @@
 [context]
 default_profile = "default"
 default_child_profile = "default"
+memory_dir = "memory"
 skill_roots = ["skills", "~/.codex/skills"]
 
 [profiles.default]
 skills = []
 memory = "rg"
-

@@ -28,6 +28,8 @@ class ContextProfile:
 @dataclass(frozen=True)
 class ContextConfig:
     path: Path
+    context_dir: Path
+    memory_dir: Path
     default_profile: str = 'default'
     default_child_profile: str = 'default'
     skill_roots: tuple[Path, ...] = ()
@@ -50,7 +52,7 @@ class ContextResolver:
     def __init__(self, config: ContextConfig, workspace: Path) -> None:
         self.config = config
         self.workspace = workspace
-        self.memory_dir = workspace / 'memory'
+        self.memory_dir = config.memory_dir
         self.skills = scan_skills(config.skill_roots)
 
     def resolve(self, profile_name: str = '', extra_skills: tuple[str, ...] = ()) -> ResolvedContext:
@@ -73,15 +75,21 @@ class ContextResolver:
         )
 
 
-def load_context_config(path: Path, workspace: Path) -> ContextConfig:
+def load_context_config(path: Path, context_dir: Path) -> ContextConfig:
     raw = _load_toml(path)
     context_raw = raw.get('context') if isinstance(raw.get('context'), dict) else {}
     profiles_raw = raw.get('profiles') if isinstance(raw.get('profiles'), dict) else {}
 
+    configured_context_dir = context_raw.get('context_dir') or context_raw.get('dir')
+    if configured_context_dir:
+        context_dir = _as_path(configured_context_dir, context_dir)
+
+    memory_dir = _as_path(context_raw.get('memory_dir') or 'memory', context_dir)
+
     skill_roots_raw = context_raw.get('skill_roots')
     if skill_roots_raw is None:
         skill_roots_raw = ['skills', '~/.codex/skills']
-    skill_roots = tuple(_as_path(item, workspace) for item in _as_list(skill_roots_raw))
+    skill_roots = tuple(_as_path(item, context_dir) for item in _as_list(skill_roots_raw))
 
     profiles: dict[str, ContextProfile] = {}
     for name, value in profiles_raw.items():
@@ -99,6 +107,8 @@ def load_context_config(path: Path, workspace: Path) -> ContextConfig:
 
     return ContextConfig(
         path=path,
+        context_dir=context_dir,
+        memory_dir=memory_dir,
         default_profile=str(context_raw.get('default_profile') or 'default'),
         default_child_profile=str(context_raw.get('default_child_profile') or 'default'),
         skill_roots=skill_roots,

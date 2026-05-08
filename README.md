@@ -14,13 +14,13 @@ This creates `.venv/` and installs `lark-oapi` for the Feishu WebSocket listener
 
 ## Config
 
-Create local config files and fill secrets outside Git:
+Create local config files and fill secrets outside Git. `~/.agentd` is for agentd's own state; the context directory can be a separate user-managed git repo:
 
 ```bash
-mkdir -p .agents/config
-cp examples/agentd.example.toml .agents/config/agentd.toml
-cp examples/context-profiles.example.toml .agents/config/context-profiles.toml
-cp examples/schedules.example.toml .agents/config/schedules.toml
+mkdir -p ~/.agentd ~/agent-context
+cp examples/agentd.example.toml ~/.agentd/agentd.toml
+cp examples/context.example.toml ~/agent-context/context.toml
+cp examples/schedules.example.toml ~/agent-context/schedules.toml
 ```
 
 Required Feishu fields can also be supplied by environment variables:
@@ -32,10 +32,13 @@ export AGENTD_FEISHU_APP_SECRET=xxx
 
 Important path defaults:
 
-- `agentd.executable` is relative to this `agentd` project root and defaults to `.venv/bin/agentd`.
-- `agentd.workspace` is where Codex turns run and defaults to this project root.
-- `runtime_dir`, `context_profiles`, and `schedules` are relative to `agentd.workspace`.
-- `codex.command` defaults to `bin/acodex`, a local wrapper around a shell `acodex` function. Set it to your own Codex command if needed.
+- `AGENTD_HOME` defaults to `~/.agentd`; the default config path is `~/.agentd/agentd.toml`.
+- `agentd.source_dir` points at the cloned agentd source tree.
+- `agentd.state_dir` stores agentd's own process and registry state, and is relative to `AGENTD_HOME` when not absolute.
+- `agentd.workspace` is where Codex turns run and defaults to `agentd.source_dir`.
+- `context.dir` points at user-maintained context, which can be a separate git repo.
+- `context.config` and `context.schedules` are relative to `context.dir`.
+- `codex.command` defaults to `bin/acodex` under `agentd.source_dir`. Set it to your own Codex command if needed.
 
 ## Commands
 
@@ -48,10 +51,10 @@ uv run agentd serve
 Use a config outside this repository with `--config`:
 
 ```bash
-uv run agentd --config /path/to/workspace/.agents/config/agentd.toml config-check
+uv run agentd --config ~/.agentd/agentd.toml config-check
 ```
 
-Runtime state is stored under the configured `runtime_dir`:
+Agentd-owned runtime state is stored under the configured `state_dir`:
 
 - `agentd.sqlite`: Feishu chat/thread to Codex thread registry.
 - `agentd.pid`: pid for the fallback process supervisor.
@@ -60,12 +63,12 @@ Runtime state is stored under the configured `runtime_dir`:
 
 ## Context
 
-Context is intentionally thin and workspace-controlled:
+Context is intentionally thin and user-controlled:
 
-- `.agents/config/context-profiles.toml`: context profiles and allowed skill names.
-- `skills/**/SKILL.md`: workspace-local skills scanned by name from YAML frontmatter.
+- `context.toml`: context profiles and allowed skill names.
+- `skills/**/SKILL.md`: context-local skills scanned by name from YAML frontmatter.
 - `memory/MEMORY.md` and `memory/daily/YYYY-MM-DD.md`: Markdown memory searched with `rg` by the agent when prior work, preferences, decisions, dates, people, or todos are relevant.
-- `.agents/config/schedules.toml`: lightweight scheduled jobs.
+- `schedules.toml`: lightweight scheduled jobs.
 
 Child sessions can choose context explicitly:
 
@@ -79,7 +82,7 @@ printf %s "$child_task" | "$AGENTD_CLI" spawn-child \
 
 ## Service Management
 
-`agentd` can manage its own long-running service process. The preferred backend is `systemd --user`; if that is not available, the `process` backend starts `agentd serve` in the background and records a pid file under `runtime_dir`.
+`agentd` can manage its own long-running service process. The preferred backend is `systemd --user`; if that is not available, the `process` backend starts `agentd serve` in the background and records a pid file under `state_dir`.
 
 ```bash
 uv run agentd service status
@@ -93,7 +96,7 @@ uv run agentd service doctor
 Backend selection defaults to `auto`:
 
 - `systemd`: used when `~/.config/systemd/user/agentd.service` exists and `systemd --user` is available.
-- `process`: used otherwise; writes `agentd.pid` and `logs/agentd-service.log` under `runtime_dir`.
+- `process`: used otherwise; writes `agentd.pid` and `logs/agentd-service.log` under `state_dir`.
 
 To install the systemd user unit:
 
@@ -104,7 +107,7 @@ uv run agentd service install --enable --now
 The generated unit uses the configured `agentd.executable` and `agentd.toml` path:
 
 ```text
-ExecStart=/path/to/agentd/.venv/bin/agentd --config /path/to/workspace/.agents/config/agentd.toml serve
+ExecStart=/path/to/agentd/.venv/bin/agentd --config /home/me/.agentd/agentd.toml serve
 Restart=always
 RestartSec=3
 ```

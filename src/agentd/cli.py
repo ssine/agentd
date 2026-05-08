@@ -79,7 +79,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     config = load_config(args.config)
     configure_logging(config.log_level)
-    config.runtime_dir.mkdir(parents=True, exist_ok=True)
+    config.state_dir.mkdir(parents=True, exist_ok=True)
     config.log_dir.mkdir(parents=True, exist_ok=True)
 
     if args.command == 'config-check':
@@ -138,14 +138,18 @@ def missing_feishu_fields(config: AgentdConfig) -> list[str]:
 def config_check(config: AgentdConfig) -> int:
     missing = missing_feishu_fields(config)
     print(f'config_path={config.config_path}')
+    print(f'home_dir={config.home_dir}')
+    print(f'source_dir={config.source_dir}')
     print(f'executable={config.executable}')
-    print(f'runtime_dir={config.runtime_dir}')
+    print(f'state_dir={config.state_dir}')
     print(f'workspace={config.workspace}')
-    print(f'context_profiles={config.context.path}')
+    print(f'context_dir={config.context.context_dir}')
+    print(f'context_config={config.context.path}')
+    print(f'context_memory_dir={config.context.memory_dir}')
     print(f'context_default_profile={config.context.default_profile}')
     print(f'context_default_child_profile={config.context.default_child_profile}')
     print(f'context_skill_roots={",".join(str(path) for path in config.context.skill_roots)}')
-    print(f'context_profiles_available={",".join(sorted(config.context.profiles))}')
+    print(f'profiles_available={",".join(sorted(config.context.profiles))}')
     try:
         resolver = ContextResolver(config.context, config.workspace)
         print(f'skills_available={",".join(sorted(resolver.skills))}')
