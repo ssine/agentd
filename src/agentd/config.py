@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import shlex
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +29,16 @@ class FeishuConfig:
 
 
 @dataclass(frozen=True)
+class CodexCaptureConfig:
+    enabled: bool = False
+    upstream_mode: str = 'codex-default'
+    upstream_url: str = ''
+    capture_dir: Path = Path()
+    db_path: Path = Path()
+    save_sensitive_headers: bool = False
+
+
+@dataclass(frozen=True)
 class CodexConfig:
     command: str = ''
     model: str = ''
@@ -37,6 +47,7 @@ class CodexConfig:
     approval_policy: str = 'never'
     turn_timeout_seconds: int = 1800
     startup_timeout_seconds: int = 60
+    capture: CodexCaptureConfig = field(default_factory=CodexCaptureConfig)
 
 
 @dataclass(frozen=True)
@@ -109,10 +120,10 @@ def _env_first(*names: str) -> str:
 
 
 def _command(value: Any, base: Path) -> str:
-    raw = str(value or (base / 'bin/acodex'))
+    raw = str(value or 'codex')
     parts = shlex.split(raw)
     if not parts:
-        return str(base / 'bin/acodex')
+        return 'codex'
 
     executable = Path(parts[0]).expanduser()
     if not executable.is_absolute() and '/' in parts[0]:
@@ -133,6 +144,7 @@ def load_config(path: str | Path | None = None) -> AgentdConfig:
     context_raw = raw.get('context') if isinstance(raw.get('context'), dict) else {}
     feishu_raw = raw.get('feishu') if isinstance(raw.get('feishu'), dict) else {}
     codex_raw = raw.get('codex') if isinstance(raw.get('codex'), dict) else {}
+    codex_capture_raw = codex_raw.get('capture') if isinstance(codex_raw.get('capture'), dict) else {}
 
     home_dir = _as_path(agentd_raw.get('home_dir') or config_path.parent, config_path.parent)
     source_dir = (
@@ -182,6 +194,11 @@ def load_config(path: str | Path | None = None) -> AgentdConfig:
         child_reply_in_thread=bool(feishu_raw.get('child_reply_in_thread', True)),
     )
 
+    capture_dir = _as_path(
+        codex_capture_raw.get('dir') or codex_capture_raw.get('capture_dir') or 'captures',
+        state_dir,
+    )
+    capture_db_path = _as_path(codex_capture_raw.get('db_path') or state_dir / 'agentd.sqlite', state_dir)
     codex = CodexConfig(
         command=_command(codex_raw.get('command'), source_dir),
         model=str(codex_raw.get('model') or ''),
@@ -190,6 +207,14 @@ def load_config(path: str | Path | None = None) -> AgentdConfig:
         approval_policy=str(codex_raw.get('approval_policy') or 'never'),
         turn_timeout_seconds=int(codex_raw.get('turn_timeout_seconds') or 1800),
         startup_timeout_seconds=int(codex_raw.get('startup_timeout_seconds') or 60),
+        capture=CodexCaptureConfig(
+            enabled=bool(codex_capture_raw.get('enabled', False)),
+            upstream_mode=str(codex_capture_raw.get('upstream_mode') or 'codex-default'),
+            upstream_url=str(codex_capture_raw.get('upstream_url') or ''),
+            capture_dir=capture_dir,
+            db_path=capture_db_path,
+            save_sensitive_headers=bool(codex_capture_raw.get('save_sensitive_headers', False)),
+        ),
     )
 
     return AgentdConfig(

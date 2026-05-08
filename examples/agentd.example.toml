@@ -27,11 +27,18 @@ main_reply_in_thread = false
 child_reply_in_thread = true
 
 [codex]
-# Defaults to the repo-local acodex wrapper if omitted.
-command = "bin/acodex"
+# Defaults to "codex" if omitted. Set an absolute path or wrapper command if needed.
+command = "codex"
 model = ""
 model_provider = ""
 sandbox = "danger-full-access"
 approval_policy = "never"
 turn_timeout_seconds = 1800
 startup_timeout_seconds = 60
+
+[codex.capture]
+# Capture final Codex POST /v1/responses requests through a local provider proxy.
+enabled = false
+upstream_mode = "codex-default" # codex-default, chatgpt, or api
+upstream_url = "" # Optional explicit full upstream /responses URL.
+save_sensitive_headers = false

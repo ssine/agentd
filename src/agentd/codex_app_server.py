@@ -11,6 +11,13 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from .capture_proxy import (
+    CAPTURE_PROVIDER_ID,
+    CaptureContext,
+    CaptureProxy,
+    capture_provider_overrides,
+    turn_client_metadata,
+)
 from .config import CodexConfig
 from .models import AgentSession, CodexTurnResult
 
@@ -119,55 +126,93 @@ class CodexAppServer:
     ) -> CodexTurnResult:
         started_at = int(time.time())
         log_path = self.log_dir / f'codex-app-server-{started_at}-{session.id}.log'
-        argv = [*shlex.split(self.config.command), 'app-server']
-        for override in config_overrides or []:
-            argv.extend(['-c', override])
-        argv.extend(['--listen', 'stdio://'])
         env = os.environ.copy()
         if extra_env:
             env.update(extra_env)
-        with log_path.open('a', encoding='utf-8') as log:
-            proc = subprocess.Popen(
-                argv,
-                cwd=session.cwd,
-                env=env,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                bufsize=1,
+        capture_proxy: CaptureProxy | None = None
+        active_overrides = list(config_overrides or [])
+        model_provider_override = ''
+        responses_metadata: dict[str, str] | None = None
+        if self.config.capture.enabled:
+            capture_proxy = CaptureProxy(
+                capture_dir=self.config.capture.capture_dir,
+                db_path=self.config.capture.db_path,
+                upstream_mode=self.config.capture.upstream_mode,
+                upstream_url=self.config.capture.upstream_url,
+                context=CaptureContext(session_id=session.id, provider_id=CAPTURE_PROVIDER_ID, model=self.config.model),
+                save_sensitive_headers=self.config.capture.save_sensitive_headers,
             )
-            try:
-                if control:
-                    control.attach(self, proc, log)
-                self._initialize(proc, log)
-                codex_thread_id = self._start_or_resume_thread(
-                    proc, log, session, developer_instructions=developer_instructions
-                )
-                if control:
-                    control.set_thread_id(codex_thread_id)
-                self._emit(
-                    event_sink,
-                    'thread_ready',
-                    session_id=session.id,
-                    codex_thread_id=codex_thread_id,
+            capture_proxy.start()
+            active_overrides.extend(capture_provider_overrides(capture_proxy.base_url))
+            model_provider_override = CAPTURE_PROVIDER_ID
+
+        argv = [*shlex.split(self.config.command), 'app-server']
+        for override in active_overrides:
+            argv.extend(['-c', override])
+        argv.extend(['--listen', 'stdio://'])
+        try:
+            with log_path.open('a', encoding='utf-8') as log:
+                proc = subprocess.Popen(
+                    argv,
                     cwd=session.cwd,
+                    env=env,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    bufsize=1,
                 )
-                turn_id = self._start_turn(proc, log, codex_thread_id, user_text)
-                if control:
-                    control.set_turn_id(turn_id)
-                self._emit(
-                    event_sink, 'turn_started', session_id=session.id, codex_thread_id=codex_thread_id, turn_id=turn_id
-                )
-                final_text, status = self._collect_turn(proc, log, codex_thread_id, turn_id, event_sink, control)
-                return CodexTurnResult(
-                    codex_thread_id=codex_thread_id,
-                    turn_id=turn_id,
-                    final_text=final_text.strip(),
-                    status=status,
-                )
-            finally:
-                self._terminate(proc)
+                try:
+                    if control:
+                        control.attach(self, proc, log)
+                    self._initialize(proc, log)
+                    codex_thread_id = self._start_or_resume_thread(
+                        proc,
+                        log,
+                        session,
+                        developer_instructions=developer_instructions,
+                        model_provider_override=model_provider_override,
+                    )
+                    if capture_proxy:
+                        capture_proxy.update_context(codex_thread_id=codex_thread_id)
+                        responses_metadata = turn_client_metadata(
+                            session_id=session.id,
+                            request_id=f'{session.id}:{started_at}',
+                            codex_thread_id=codex_thread_id,
+                        )
+                    if control:
+                        control.set_thread_id(codex_thread_id)
+                    self._emit(
+                        event_sink,
+                        'thread_ready',
+                        session_id=session.id,
+                        codex_thread_id=codex_thread_id,
+                        cwd=session.cwd,
+                    )
+                    turn_id = self._start_turn(proc, log, codex_thread_id, user_text, responses_metadata)
+                    if capture_proxy:
+                        capture_proxy.update_context(codex_turn_id=turn_id)
+                    if control:
+                        control.set_turn_id(turn_id)
+                    self._emit(
+                        event_sink,
+                        'turn_started',
+                        session_id=session.id,
+                        codex_thread_id=codex_thread_id,
+                        turn_id=turn_id,
+                    )
+                    final_text, status = self._collect_turn(proc, log, codex_thread_id, turn_id, event_sink, control)
+                    return CodexTurnResult(
+                        codex_thread_id=codex_thread_id,
+                        turn_id=turn_id,
+                        final_text=final_text.strip(),
+                        status=status,
+                    )
+                finally:
+                    self._terminate(proc)
+        finally:
+            if capture_proxy:
+                capture_proxy.stop()
 
     def _initialize(self, proc: subprocess.Popen[str], log: Any) -> None:
         self._request(
@@ -188,6 +233,7 @@ class CodexAppServer:
         session: AgentSession,
         *,
         developer_instructions: str = '',
+        model_provider_override: str = '',
     ) -> str:
         common: dict[str, Any] = {
             'cwd': session.cwd,
@@ -199,8 +245,9 @@ class CodexAppServer:
             common['developerInstructions'] = developer_instructions
         if self.config.model:
             common['model'] = self.config.model
-        if self.config.model_provider:
-            common['modelProvider'] = self.config.model_provider
+        model_provider = model_provider_override or self.config.model_provider
+        if model_provider:
+            common['modelProvider'] = model_provider
 
         if session.codex_thread_id:
             result = self._request(
@@ -230,12 +277,21 @@ class CodexAppServer:
         )
         return str(result['thread']['id'])
 
-    def _start_turn(self, proc: subprocess.Popen[str], log: Any, thread_id: str, user_text: str) -> str:
+    def _start_turn(
+        self,
+        proc: subprocess.Popen[str],
+        log: Any,
+        thread_id: str,
+        user_text: str,
+        responses_metadata: dict[str, str] | None = None,
+    ) -> str:
         params: dict[str, Any] = {
             'threadId': thread_id,
             'input': [{'type': 'text', 'text': user_text, 'text_elements': []}],
             'approvalPolicy': self.config.approval_policy,
         }
+        if responses_metadata:
+            params['responsesapiClientMetadata'] = responses_metadata
         sandbox_policy = self._turn_sandbox_policy()
         if sandbox_policy:
             params['sandboxPolicy'] = sandbox_policy

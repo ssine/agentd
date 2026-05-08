@@ -107,6 +107,45 @@ class ConfigTest(unittest.TestCase):
             self.assertEqual(config.context.path, config_dir / 'context-profiles.toml')
             self.assertEqual(config.context.skill_roots, (workspace / 'skills',))
 
+    def test_codex_defaults_and_capture_config(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_dir:
+            root = Path(raw_dir)
+            home = root / '.agentd'
+            source_dir = root / 'agentd-src'
+            workspace = root / 'workspace'
+            home.mkdir()
+            source_dir.mkdir()
+            workspace.mkdir()
+            config_path = home / 'agentd.toml'
+            config_path.write_text(
+                '\n'.join(
+                    [
+                        '[agentd]',
+                        f'source_dir = "{source_dir}"',
+                        f'workspace = "{workspace}"',
+                        'state_dir = "state"',
+                        '',
+                        '[codex.capture]',
+                        'enabled = true',
+                        'upstream_mode = "chatgpt"',
+                        'upstream_url = "https://example.test/responses"',
+                        'save_sensitive_headers = true',
+                        '',
+                    ]
+                ),
+                encoding='utf-8',
+            )
+
+            config = load_config(config_path)
+
+            self.assertEqual(config.codex.command, 'codex')
+            self.assertTrue(config.codex.capture.enabled)
+            self.assertEqual(config.codex.capture.upstream_mode, 'chatgpt')
+            self.assertEqual(config.codex.capture.upstream_url, 'https://example.test/responses')
+            self.assertEqual(config.codex.capture.capture_dir, home / 'state' / 'captures')
+            self.assertEqual(config.codex.capture.db_path, home / 'state' / 'agentd.sqlite')
+            self.assertTrue(config.codex.capture.save_sensitive_headers)
+
 
 if __name__ == '__main__':
     unittest.main()

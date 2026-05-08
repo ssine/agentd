@@ -160,6 +160,11 @@ def config_check(config: AgentdConfig) -> int:
     print(f'feishu_app_id={"present" if config.feishu.app_id else "missing"}')
     print(f'feishu_app_secret={"present" if config.feishu.app_secret else "missing"}')
     print(f'codex_command={config.codex.command}')
+    print(f'codex_capture_enabled={config.codex.capture.enabled}')
+    print(f'codex_capture_dir={config.codex.capture.capture_dir}')
+    print(f'codex_capture_upstream_mode={config.codex.capture.upstream_mode}')
+    if config.codex.capture.upstream_url:
+        print(f'codex_capture_upstream_url={config.codex.capture.upstream_url}')
     if missing:
         print(f'missing={",".join(missing)}')
         return 2

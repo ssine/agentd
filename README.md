@@ -38,7 +38,7 @@ Important path defaults:
 - `agentd.workspace` is where Codex turns run and defaults to `agentd.source_dir`.
 - `context.dir` points at user-maintained context, which can be a separate git repo.
 - `context.config` and `context.schedules` are relative to `context.dir`.
-- `codex.command` defaults to `bin/acodex` under `agentd.source_dir`. Set it to your own Codex command if needed.
+- `codex.command` defaults to `codex`. Set it to an absolute path or wrapper command if needed.
 
 ## Commands
 
@@ -60,6 +60,17 @@ Agentd-owned runtime state is stored under the configured `state_dir`:
 - `agentd.pid`: pid for the fallback process supervisor.
 - `logs/`: per-turn Codex app-server JSON-RPC logs.
 - `logs/agentd-service.log`: stdout/stderr for the fallback process supervisor.
+- `captures/responses/`: raw Responses API captures when `codex.capture.enabled = true`.
+
+Optional Codex Responses capture:
+
+```toml
+[codex.capture]
+enabled = true
+upstream_mode = "codex-default"
+```
+
+When enabled, `agentd` injects a temporary local model provider for the Codex app-server process and records final `POST /v1/responses` request/response exchanges under `state_dir`. The proxy only handles the model provider endpoint; it does not change `chatgpt_base_url` or set global proxy environment variables.
 
 ## Context
 
