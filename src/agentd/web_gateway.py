@@ -428,7 +428,6 @@ INDEX_HTML = r"""<!doctype html>
       <span id="sync" class="muted"></span>
     </header>
     <div class="scroll">
-      <input id="chatId" value="web" aria-label="chat id">
       <div id="runs" style="margin-top:12px"></div>
     </div>
   </section>
@@ -702,11 +701,10 @@ document.getElementById('composer').addEventListener('submit', async event => {
   if (!text) return;
   sending = true;
   try {
-    const chatId = document.getElementById('chatId').value.trim() || 'web';
     const response = await fetch('/api/messages', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({text, chat_id: chatId, session_id: selectedSessionId})
+      body: JSON.stringify({text, chat_id: 'web', session_id: selectedSessionId})
     });
     const result = await response.json();
     if (!result.ok) throw new Error(result.error || 'send failed');
