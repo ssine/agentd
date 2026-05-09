@@ -481,7 +481,14 @@ class CodexAppServer:
             elif method == 'error':
                 last_error = json.dumps(params, ensure_ascii=False)
                 self._log(log, f'codex error notification: {last_error}')
-                self._emit(event_sink, 'error', text=last_error)
+                self._emit(
+                    event_sink,
+                    'error',
+                    text=last_error,
+                    will_retry=params.get('willRetry') is True,
+                    thread_id=str(params.get('threadId') or ''),
+                    turn_id=str(params.get('turnId') or ''),
+                )
                 if (
                     params.get('threadId') == thread_id
                     and params.get('turnId') == turn_id

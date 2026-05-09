@@ -796,6 +796,18 @@ class AgentDaemon:
                 self.registry.update_codex_thread(active.session.id, '')
                 self.registry.update_run(active.run_id, codex_thread_id='')
                 self.log.info('cleared Codex thread for session %s after invalid encrypted content', active.session.id)
+            if is_retryable_codex_error_event(event):
+                self.log.info('Codex reported retryable error for session %s: %s', active.session.id, compact(text, 300))
+                self.registry.update_run_and_mark_card_dirty(
+                    active.run_id,
+                    state='running',
+                    status='Codex 正在重连',
+                    status_phase='running',
+                    error='',
+                    finished_at=None,
+                )
+                self._publish_status(active, force=True, create=True)
+                return
             if text and self._last_model_output(active.run_id) != text:
                 self._add_model_message(active, text, phase='error')
             self.registry.update_run_and_mark_card_dirty(
@@ -1530,6 +1542,19 @@ def friendly_tool_name(tool: str) -> str:
 
 def has_invalid_encrypted_content(text: object) -> bool:
     return 'invalid_encrypted_content' in str(text or '')
+
+
+def is_retryable_codex_error_event(event: dict[str, Any]) -> bool:
+    if event.get('will_retry') is True or event.get('willRetry') is True:
+        return True
+    text = str(event.get('text') or '')
+    if not text:
+        return False
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return False
+    return isinstance(payload, dict) and (payload.get('willRetry') is True or payload.get('will_retry') is True)
 
 
 def failure_status(prefix: str, detail: str) -> str:

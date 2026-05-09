@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import time
 import unittest
@@ -269,6 +270,115 @@ class DurableRunProjectionTest(unittest.TestCase):
             self.assertIsNotNone(updated)
             assert updated is not None
             self.assertEqual(updated.final_message_text, 'done')
+
+    def test_retryable_codex_error_keeps_status_card_running(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_dir:
+            root = Path(raw_dir)
+            config = make_config(root)
+            daemon = AgentDaemon(config, dry_send=True)
+            session = daemon.registry.get_main_session('chat-1', str(root))
+            run = daemon.registry.create_run(
+                session_id=session.id,
+                source_message_id='msg-1',
+                prompt='hello',
+                host='host-a',
+                subject='Codex',
+                display_title='Durable run',
+                status_message_id='status-card',
+            )
+            active = ActiveRun(run_id=run.id, session=session, control=CodexRunControl())
+            payload = {
+                'error': {'message': 'Reconnecting... 1/5'},
+                'willRetry': True,
+                'threadId': 'thread-1',
+                'turnId': 'turn-1',
+            }
+
+            with redirect_stdout(StringIO()):
+                daemon._handle_codex_event(active, {'type': 'error', 'text': json.dumps(payload)})
+
+            updated = daemon.registry.get_run(run.id)
+            self.assertIsNotNone(updated)
+            assert updated is not None
+            self.assertEqual(updated.state, 'running')
+            self.assertEqual(updated.status_phase, 'running')
+            self.assertEqual(updated.status, 'Codex 正在重连')
+            self.assertEqual(updated.error, '')
+            self.assertIsNone(updated.finished_at)
+            events = daemon.registry.list_run_events(run.id)
+            self.assertEqual(events, [])
+
+            with daemon.registry.connect() as conn:
+                row = conn.execute(
+                    """
+                    select payload_json
+                    from feishu_outbox
+                    where run_id = ? and kind = 'status_card'
+                    """,
+                    (run.id,),
+                ).fetchone()
+            self.assertIsNotNone(row)
+            assert row is not None
+            card = json.loads(str(row['payload_json']))['card']
+            self.assertEqual(card['header']['template'], 'blue')
+            self.assertNotIn('错误信息', json.dumps(card, ensure_ascii=False))
+
+    def test_status_message_target_change_resends_same_render_hash(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_dir:
+            root = Path(raw_dir)
+            config = make_config(root)
+            daemon = AgentDaemon(config, dry_send=True)
+            session = daemon.registry.get_main_session('chat-1', str(root))
+            run = daemon.registry.create_run(
+                session_id=session.id,
+                source_message_id='msg-1',
+                prompt='hello',
+                host='host-a',
+                subject='Codex',
+                display_title='Durable run',
+                status_message_id='old-card',
+            )
+            daemon.registry.update_run_and_mark_card_dirty(
+                run.id,
+                state='succeeded',
+                status_phase='done',
+                status='完成',
+                finished_at=int(time.time()),
+            )
+
+            with redirect_stdout(StringIO()):
+                daemon._publish_status_for_run(run.id, force=True)
+
+            projection = daemon.registry.get_card_projection(run.id)
+            self.assertIsNotNone(projection)
+            assert projection is not None
+            first_hash = str(projection['last_render_hash'])
+            self.assertTrue(first_hash)
+
+            daemon.registry.update_run(run.id, status_message_id='new-card')
+            projection = daemon.registry.get_card_projection(run.id)
+            self.assertIsNotNone(projection)
+            assert projection is not None
+            self.assertEqual(projection['dirty'], 1)
+            self.assertEqual(projection['last_render_hash'], '')
+
+            with redirect_stdout(StringIO()):
+                daemon._publish_status_for_run(run.id, force=True)
+
+            with daemon.registry.connect() as conn:
+                row = conn.execute(
+                    """
+                    select payload_json
+                    from feishu_outbox
+                    where run_id = ? and kind = 'status_card'
+                    """,
+                    (run.id,),
+                ).fetchone()
+            self.assertIsNotNone(row)
+            assert row is not None
+            payload = json.loads(str(row['payload_json']))
+            self.assertEqual(payload['message_id'], 'new-card')
+            self.assertEqual(payload['card']['header']['template'], 'green')
 
     def test_spawned_child_uses_thread_intro_message_as_status_card(self) -> None:
         with tempfile.TemporaryDirectory() as raw_dir:

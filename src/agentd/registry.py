@@ -517,6 +517,18 @@ class Registry:
                     insert into card_projections(run_id, remote_message_id, updated_at)
                     values(?, ?, ?)
                     on conflict(run_id) do update set
+                        dirty = case
+                            when remote_message_id != excluded.remote_message_id then 1
+                            else dirty
+                        end,
+                        last_render_hash = case
+                            when remote_message_id != excluded.remote_message_id then ''
+                            else last_render_hash
+                        end,
+                        last_rendered_at = case
+                            when remote_message_id != excluded.remote_message_id then null
+                            else last_rendered_at
+                        end,
                         remote_message_id = excluded.remote_message_id,
                         updated_at = excluded.updated_at
                     """,
