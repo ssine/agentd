@@ -11,7 +11,10 @@ class BootstrapOptions:
     context_dir: Path
     source_dir: Path
     executable: str = '.venv/bin/agentd'
+    runner_kind: str = 'codex'
     codex_command: str = 'codex'
+    claude_command: str = 'aclaude'
+    claude_model: str = 'sonnet'
     overwrite: bool = False
 
 
@@ -117,6 +120,10 @@ enabled = true
 host = "127.0.0.1"
 port = 8765
 
+[runner]
+# Supported values: "codex" and "claude_code".
+kind = "{options.runner_kind}"
+
 [codex]
 command = "{options.codex_command}"
 model = ""
@@ -125,6 +132,13 @@ sandbox = "danger-full-access"
 approval_policy = "never"
 turn_timeout_seconds = 1800
 startup_timeout_seconds = 60
+
+[claude]
+command = "{options.claude_command}"
+model = "{options.claude_model}"
+permission_mode = "bypassPermissions"
+use_login_shell = true
+turn_timeout_seconds = 1800
 """
 
 
@@ -192,7 +206,7 @@ def skills_readme_md() -> str:
     return """
 # Skills
 
-Add context-local Codex skills under `skills/**/SKILL.md`.
+Add context-local agentd skills under `skills/**/SKILL.md`.
 
 Each `SKILL.md` should include frontmatter:
 

@@ -91,7 +91,7 @@ def systemd_unit(config: AgentdConfig) -> str:
     return '\n'.join(
         [
             '[Unit]',
-            'Description=agentd Feishu to Codex bridge',
+            'Description=agentd IM-to-agent control plane',
             'After=network-online.target',
             '',
             '[Service]',
@@ -169,7 +169,7 @@ def collect_checks(config: AgentdConfig, backend: str) -> list[Check]:
     checks.append(check_path('state_dir', _state_dir(config), must_be_dir=True, create=True))
     checks.append(check_path('log_dir', config.log_dir, must_be_dir=True, create=True))
     checks.append(check_executable('agentd executable', agentd_executable(config)))
-    checks.append(check_command('codex command', config.codex.command))
+    checks.append(check_runner_command(config))
 
     if config.feishu.app_id and config.feishu.app_secret:
         checks.append(Check('ok', 'Feishu credentials', 'present'))
@@ -241,9 +241,38 @@ def check_command(name: str, command: str) -> Check:
     return Check('fail', name, f'executable not found: {executable}')
 
 
+def check_runner_command(config: AgentdConfig) -> Check:
+    if config.runner.kind == 'claude_code':
+        if config.claude.use_login_shell:
+            return check_login_shell_command('Claude Code command', config.claude.command)
+        return check_command('Claude Code command', config.claude.command)
+    return check_command('Codex command', config.codex.command)
+
+
+def check_login_shell_command(name: str, command: str) -> Check:
+    parts = shlex.split(command)
+    if not parts:
+        return Check('fail', name, 'empty')
+    executable = parts[0]
+    result = subprocess.run(
+        ['zsh', '-lic', f'command -v {shlex.quote(executable)} >/dev/null'],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode == 0:
+        return Check('ok', name, command)
+    detail = (result.stderr or result.stdout or f'login shell command not found: {executable}').strip()
+    return Check('fail', name, detail.splitlines()[-1] if detail else f'login shell command not found: {executable}')
+
+
 def recent_log_checks(config: AgentdConfig) -> list[Check]:
     checks: list[Check] = []
-    paths = [service_log_path(config), *sorted(config.log_dir.glob('codex-app-server-*.log'))[-3:]]
+    paths = [
+        service_log_path(config),
+        *sorted(config.log_dir.glob('codex-app-server-*.log'))[-3:],
+        *sorted(config.log_dir.glob('claude-code-*.log'))[-3:],
+    ]
     for path in paths:
         if not path.exists():
             continue

@@ -1,11 +1,11 @@
 ---
 name: agentd-ops
-description: agentd maintenance and runtime troubleshooting. Use for agentd service management, config checks, context profiles, schedules, Feishu routing, and Codex app-server routing.
+description: agentd maintenance and runtime troubleshooting. Use for agentd service management, config checks, context profiles, schedules, Feishu/Web routing, and runner routing.
 ---
 
 # agentd Operations
 
-This skill is built into agentd and is injected into every agentd-managed Codex run.
+This skill is built into agentd and is injected into every agentd-managed runner turn.
 
 ## Workflow
 

@@ -26,7 +26,10 @@ class BootstrapTest(unittest.TestCase):
             self.assertTrue((options.context_dir / 'memory' / 'MEMORY.md').is_file())
             self.assertTrue((options.context_dir / 'memory' / 'projects').is_dir())
             self.assertTrue((options.context_dir / 'skills' / 'README.md').is_file())
-            self.assertIn(f'source_dir = "{options.source_dir}"', options.config_path.read_text(encoding='utf-8'))
+            text = options.config_path.read_text(encoding='utf-8')
+            self.assertIn(f'source_dir = "{options.source_dir}"', text)
+            self.assertIn('[runner]\n# Supported values: "codex" and "claude_code".\nkind = "codex"', text)
+            self.assertIn('[claude]\ncommand = "aclaude"\nmodel = "sonnet"', text)
 
     def test_init_agentd_does_not_overwrite_existing_files_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as raw_dir:

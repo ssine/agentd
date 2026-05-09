@@ -1,1 +1,1 @@
-"""Local agent daemon for routing Feishu messages into Codex sessions."""
+"""Local agent daemon for routing IM and web messages into agent runners."""

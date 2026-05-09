@@ -18,6 +18,7 @@ from agentd.service import (
     read_startup_notice,
     service_notice_chat_id,
     startup_notice_path,
+    systemd_unit,
     write_deferred_service_command,
     write_startup_notice,
 )
@@ -105,6 +106,18 @@ class ServiceRequestTest(unittest.TestCase):
             self.assertEqual(request['backend'], 'process')
             self.assertEqual(request['timeout_seconds'], 7)
             self.assertIn('scheduled agentd service restart after active runs finish', stdout.getvalue())
+
+    def test_systemd_unit_description_is_runner_neutral(self) -> None:
+        config = SimpleNamespace(
+            executable=Path('/tmp/agentd'),
+            config_path=Path('/tmp/agentd.toml'),
+            workspace=Path('/tmp/workspace'),
+        )
+
+        unit = systemd_unit(config)
+
+        self.assertIn('Description=agentd IM-to-agent control plane', unit)
+        self.assertNotIn('Feishu to Codex bridge', unit)
 
 
 if __name__ == '__main__':

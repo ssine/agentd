@@ -10,7 +10,6 @@ from pathlib import Path
 from .config import (
     PROJECT_ROOT,
     AgentdConfig,
-    default_config_path,
     default_context_dir,
     default_home_dir,
     load_config,
@@ -34,13 +33,16 @@ def main(argv: list[str] | None = None) -> int:
     init.add_argument('--context-dir', default='', help='user context directory; defaults to ~/agent-context')
     init.add_argument('--source-dir', default='', help='agentd source tree; defaults to this repository')
     init.add_argument('--executable', default='.venv/bin/agentd', help='agentd executable path relative to source-dir')
+    init.add_argument('--runner-kind', default='codex', choices=['codex', 'claude_code'], help='default agent runner')
     init.add_argument('--codex-command', default='codex', help='Codex command to put in agentd.toml')
+    init.add_argument('--claude-command', default='aclaude', help='Claude Code command to put in agentd.toml')
+    init.add_argument('--claude-model', default='sonnet', help='Claude Code model alias to put in agentd.toml')
     init.add_argument('--overwrite', action='store_true', help='overwrite existing bootstrap files')
 
     serve = sub.add_parser('serve', help='start Feishu websocket listener')
     serve.add_argument('--dry-send', action='store_true', help='print replies instead of sending to Feishu')
 
-    simulate = sub.add_parser('simulate-message', help='route one local fake message through Codex')
+    simulate = sub.add_parser('simulate-message', help='route one local fake message through the configured runner')
     simulate.add_argument('--chat-id', default='local-p2p')
     simulate.add_argument('--message-id', default='')
     simulate.add_argument('--thread-id', default='')
@@ -160,7 +162,7 @@ def init_request(args: argparse.Namespace) -> int:
     home_dir = Path(args.home_dir).expanduser().resolve() if args.home_dir else default_home_dir()
     context_dir = Path(args.context_dir).expanduser().resolve() if args.context_dir else default_context_dir()
     source_dir = Path(args.source_dir).expanduser().resolve() if args.source_dir else PROJECT_ROOT
-    config_path = Path(args.config).expanduser().resolve() if args.config else default_config_path()
+    config_path = Path(args.config).expanduser().resolve() if args.config else home_dir / 'agentd.toml'
 
     result = init_agentd(
         BootstrapOptions(
@@ -169,7 +171,10 @@ def init_request(args: argparse.Namespace) -> int:
             context_dir=context_dir,
             source_dir=source_dir,
             executable=str(args.executable or '.venv/bin/agentd'),
+            runner_kind=str(args.runner_kind or 'codex'),
             codex_command=str(args.codex_command or 'codex'),
+            claude_command=str(args.claude_command or 'aclaude'),
+            claude_model=str(args.claude_model or 'sonnet'),
             overwrite=bool(args.overwrite),
         )
     )
@@ -230,6 +235,7 @@ def config_check(config: AgentdConfig) -> int:
     print(f'web_enabled={config.web.enabled}')
     print(f'web_host={config.web.host}')
     print(f'web_port={config.web.port}')
+    print(f'runner_kind={config.runner.kind}')
     print(f'codex_command={config.codex.command}')
     print(f'codex_capture_enabled={config.codex.capture.enabled}')
     print(f'codex_capture_dir={config.codex.capture.capture_dir}')
@@ -250,6 +256,10 @@ def config_check(config: AgentdConfig) -> int:
     print(f'codex_otel_archive_period={config.codex.otel.archive_period}')
     print(f'codex_otel_archive_format={config.codex.otel.archive_format}')
     print(f'codex_otel_zstd_level={config.codex.otel.zstd_level}')
+    print(f'claude_command={config.claude.command}')
+    print(f'claude_model={config.claude.model}')
+    print(f'claude_permission_mode={config.claude.permission_mode}')
+    print(f'claude_use_login_shell={config.claude.use_login_shell}')
     if missing:
         print(f'missing={",".join(missing)}')
         return 2
@@ -258,10 +268,10 @@ def config_check(config: AgentdConfig) -> int:
 
 
 def add_spawn_request_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument('--cwd', required=True, help='working directory for the child Codex session')
+    parser.add_argument('--cwd', required=True, help='working directory for the child agent session')
     parser.add_argument('--title', default='', help='short label shown on the child task card')
-    parser.add_argument('--prompt', default='', help='prompt for the child Codex; stdin is used when omitted')
-    parser.add_argument('--profile', default='', help='context profile for the child Codex session')
+    parser.add_argument('--prompt', default='', help='prompt for the child agent; stdin is used when omitted')
+    parser.add_argument('--profile', default='', help='context profile for the child agent session')
     parser.add_argument('--skills', default='', help='comma-separated skill names to add for the child session')
     parser.add_argument('--parent-session-id', type=int, default=0)
     parser.add_argument('--parent-status-message-id', default='')
@@ -283,7 +293,7 @@ def spawn_request(config: AgentdConfig, args: argparse.Namespace, *, mode: str) 
     chat_id = args.chat_id or os.environ.get('AGENTD_CHAT_ID') or ''
     if not parent_session_id or not parent_status_message_id or not chat_id:
         print(
-            'missing parent context; run this from an agentd-managed Codex turn or pass '
+            'missing parent context; run this from an agentd-managed agent turn or pass '
             '--parent-session-id, --parent-status-message-id, and --chat-id',
             file=sys.stderr,
         )
@@ -324,7 +334,7 @@ def set_title_request(config: AgentdConfig, args: argparse.Namespace) -> int:
     session_id = args.session_id or int(os.environ.get('AGENTD_SESSION_ID') or 0)
     if not session_id:
         print(
-            'missing session context; run this from an agentd-managed Codex turn or pass --session-id', file=sys.stderr
+            'missing session context; run this from an agentd-managed agent turn or pass --session-id', file=sys.stderr
         )
         return 2
 

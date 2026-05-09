@@ -39,6 +39,33 @@ class CliTest(unittest.TestCase):
             self.assertTrue((context_dir / 'context.toml').is_file())
             self.assertTrue((context_dir / 'memory' / 'MEMORY.md').is_file())
 
+    def test_init_uses_home_dir_config_path_when_config_is_omitted(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_dir:
+            root = Path(raw_dir)
+            home_dir = root / 'home'
+            context_dir = root / 'context'
+            source_dir = root / 'agentd'
+
+            with redirect_stdout(StringIO()):
+                result = main(
+                    [
+                        'init',
+                        '--home-dir',
+                        str(home_dir),
+                        '--context-dir',
+                        str(context_dir),
+                        '--source-dir',
+                        str(source_dir),
+                        '--runner-kind',
+                        'claude_code',
+                    ]
+                )
+
+            self.assertEqual(result, 0)
+            config_path = home_dir / 'agentd.toml'
+            self.assertTrue(config_path.is_file())
+            self.assertIn('kind = "claude_code"', config_path.read_text(encoding='utf-8'))
+
     def test_service_restart_defer_defaults_to_ten_seconds(self) -> None:
         with tempfile.TemporaryDirectory() as raw_dir:
             root = Path(raw_dir)

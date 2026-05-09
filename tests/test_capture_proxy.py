@@ -144,8 +144,11 @@ class CaptureProxyTest(unittest.TestCase):
 
                     self.assertEqual(upstream.requests[0]['path'], '/v1/responses/compact')
                     self.assertEqual(upstream.requests[0]['body'], raw_body)
-                    with sqlite3.connect(root / 'agentd.sqlite') as conn:
+                    conn = sqlite3.connect(root / 'agentd.sqlite')
+                    try:
                         count = conn.execute('select count(*) from model_http_exchanges').fetchone()[0]
+                    finally:
+                        conn.close()
                     self.assertEqual(count, 0)
                 finally:
                     proxy.stop()
