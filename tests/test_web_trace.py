@@ -96,6 +96,10 @@ class WebTraceTest(unittest.TestCase):
 
             self.assertEqual([item['codex_turn_id'] for item in state['trace']['exchanges']], ['turn-1'])
             self.assertEqual(
+                [item['codex_resume_command'] for item in state['runs'] if item['id'] == first.id],
+                [f'cd {shlex.quote(str(root))} && codex resume thread'],
+            )
+            self.assertEqual(
                 state['selected_run']['codex_resume_command'],
                 f'cd {shlex.quote(str(root))} && codex resume thread',
             )

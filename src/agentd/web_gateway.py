@@ -167,9 +167,14 @@ def handle_web_message(daemon: Any, payload: dict[str, Any]) -> dict[str, Any]:
 
 def build_state(registry: Registry, *, selected_run_id: int | None = None) -> dict[str, Any]:
     sessions = registry.list_sessions(limit=80)
+    sessions_by_id = {session.id: session for session in sessions}
     runs = registry.list_runs(limit=120)
     selected = registry.get_run(selected_run_id) if selected_run_id is not None else (runs[0] if runs else None)
-    selected_session = registry.get_session(selected.session_id) if selected is not None else None
+    selected_session = (
+        sessions_by_id.get(selected.session_id) or registry.get_session(selected.session_id)
+        if selected is not None
+        else None
+    )
     events = registry.list_run_events(selected.id) if selected is not None else []
     trace_rows = registry.list_model_http_exchanges(
         session_id=selected.session_id if selected is not None else None,
@@ -178,12 +183,17 @@ def build_state(registry: Registry, *, selected_run_id: int | None = None) -> di
         limit=250,
     )
     trace = build_responses_trace(trace_rows)
+    run_dicts = []
+    for run in runs:
+        run_dict = record_to_dict(run)
+        run_dict['codex_resume_command'] = codex_resume_command(run, sessions_by_id.get(run.session_id))
+        run_dicts.append(run_dict)
     selected_run = record_to_dict(selected) if selected is not None else None
     if selected_run is not None and selected is not None:
         selected_run['codex_resume_command'] = codex_resume_command(selected, selected_session)
     return {
         'sessions': [record_to_dict(session) for session in sessions],
-        'runs': [record_to_dict(run) for run in runs],
+        'runs': run_dicts,
         'selected_run': selected_run,
         'selected_session': record_to_dict(selected_session) if selected_session is not None else None,
         'events': [
@@ -303,14 +313,25 @@ INDEX_HTML = r"""<!doctype html>
       background: transparent;
       color: inherit;
       text-align: left;
-      padding: 10px;
+      padding: 0;
       margin-bottom: 8px;
       border-radius: 6px;
+      overflow: hidden;
+    }
+    .run-select {
+      width: 100%;
+      border: 0;
+      background: transparent;
+      color: inherit;
+      text-align: left;
+      padding: 10px;
       cursor: pointer;
+      font: inherit;
     }
     .run.active { border-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); }
     .run-title { font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .run-meta { margin-top: 4px; color: var(--muted); font-size: 12px; }
+    .run-copy { margin: 0 10px 10px; }
     .status-running { color: var(--accent); }
     .status-done { color: var(--ok); }
     .status-failed { color: var(--bad); }
@@ -574,17 +595,22 @@ function renderRuns(runs, activeId) {
     const cls = run.id === activeId ? 'run active' : 'run';
     const phase = `status-${esc(run.status_phase || '')}`;
     const title = esc(run.display_title || run.subject || `run ${run.id}`);
-    return `<button class="${cls}" data-run-id="${run.id}">
-      <div class="run-title">${title}</div>
-      <div class="run-meta"><span class="${phase}">${esc(run.status_phase)}</span> · #${run.id} · ${esc(run.status)}</div>
-    </button>`;
+    const command = run.codex_resume_command || '';
+    return `<div class="${cls}">
+      <button class="run-select" type="button" data-run-id="${run.id}">
+        <div class="run-title">${title}</div>
+        <div class="run-meta"><span class="${phase}">${esc(run.status_phase)}</span> · #${run.id} · ${esc(run.status)}</div>
+      </button>
+      ${command ? `<button class="copy run-copy" type="button" data-copy="${esc(command)}">复制 resume</button>` : ''}
+    </div>`;
   }).join('');
-  root.querySelectorAll('button[data-run-id]').forEach(button => {
+  root.querySelectorAll('.run-select[data-run-id]').forEach(button => {
     button.addEventListener('click', () => {
       selectedRunId = Number(button.dataset.runId);
       loadState();
     });
   });
+  wireCopyButtons(root);
 }
 
 function renderMessages(run, events) {
@@ -618,20 +644,26 @@ function renderMessages(run, events) {
     }
   }
   root.innerHTML = blocks.join('');
+  wireCopyButtons(root);
+  renderedMessagesRunId = run.id;
+  root.scrollTop = shouldFollowBottom ? root.scrollHeight : previousScrollTop;
+}
+
+function wireCopyButtons(root) {
   root.querySelectorAll('button[data-copy]').forEach(button => {
     button.addEventListener('click', async () => {
       const text = button.dataset.copy || '';
       try {
         await navigator.clipboard.writeText(text);
+        const label = button.dataset.copyLabel || button.textContent || '复制';
+        button.dataset.copyLabel = label;
         button.textContent = '已复制';
-        setTimeout(() => { button.textContent = '复制命令'; }, 1200);
+        setTimeout(() => { button.textContent = label; }, 1200);
       } catch {
         window.prompt('复制命令', text);
       }
     });
   });
-  renderedMessagesRunId = run.id;
-  root.scrollTop = shouldFollowBottom ? root.scrollHeight : previousScrollTop;
 }
 
 function isScrolledToBottom(element) {
@@ -728,7 +760,7 @@ function renderExchangeDetail(exchange, exchangeId) {
     </details>
     <details data-detail-section="response" ${isExchangeDetailSectionOpen(exchangeId, 'response', true) ? 'open' : ''}>
       <summary>response</summary>
-      ${renderJsonTree(exchange.response_json ?? {}, exchangeId, 'response')}
+      ${renderJsonTree(compactResponseForDisplay(exchange.response_json ?? {}), exchangeId, 'response')}
     </details>
   `;
 }
@@ -813,8 +845,10 @@ function renderJsonValue(value, nodeKey, depth) {
 function renderJsonObject(value, nodeKey, depth) {
   const entries = Object.entries(value);
   const open = isJsonNodeOpen(nodeKey, depth);
+  const meta = jsonObjectMeta(value);
+  const count = `${entries.length} keys${meta ? ' · ' + meta : ''}`;
   return `<details class="json-node" data-json-node-key="${esc(nodeKey)}" ${open ? 'open' : ''}>
-    <summary>${renderJsonNodeSummary('{}', `${entries.length} keys`, nodeKey)}</summary>
+    <summary>${renderJsonNodeSummary('{}', count, nodeKey)}</summary>
     <div class="json-children">
       ${entries.map(([key, item]) => renderJsonMember(JSON.stringify(key), item, `${nodeKey}.${escapeJsonPathKey(key)}`, depth + 1)).join('')}
     </div>
@@ -823,8 +857,10 @@ function renderJsonObject(value, nodeKey, depth) {
 
 function renderJsonArray(value, nodeKey, depth) {
   const open = isJsonNodeOpen(nodeKey, depth);
+  const meta = jsonArrayMeta(value);
+  const count = `${value.length} items${meta ? ' · ' + meta : ''}`;
   return `<details class="json-node" data-json-node-key="${esc(nodeKey)}" ${open ? 'open' : ''}>
-    <summary>${renderJsonNodeSummary('[]', `${value.length} items`, nodeKey)}</summary>
+    <summary>${renderJsonNodeSummary('[]', count, nodeKey)}</summary>
     <div class="json-children">
       ${value.map((item, index) => renderJsonMember(`[${index}]`, item, `${nodeKey}[${index}]`, depth + 1)).join('')}
     </div>
@@ -852,6 +888,84 @@ function renderJsonString(value) {
     return `<div class="json-text-block"><pre>${esc(value)}</pre></div>`;
   }
   return `<span class="json-string">${esc(JSON.stringify(value))}</span>`;
+}
+
+const RESPONSE_CONFIG_FIELDS = new Set([
+  'instructions',
+  'tools',
+  'tool_choice',
+  'parallel_tool_calls',
+  'reasoning',
+  'text',
+  'temperature',
+  'top_p',
+  'top_logprobs',
+  'truncation',
+  'store',
+  'metadata',
+  'user',
+  'prompt_cache_key',
+  'prompt_cache_retention',
+  'service_tier',
+  'background',
+  'max_output_tokens',
+  'max_tool_calls',
+  'frequency_penalty',
+  'presence_penalty',
+  'safety_identifier',
+  'moderation'
+]);
+
+function compactResponseForDisplay(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return value ?? {};
+  const result = {};
+  const primary = [
+    'id',
+    'object',
+    'created_at',
+    'completed_at',
+    'status',
+    'model',
+    'output',
+    'usage',
+    'error',
+    'incomplete_details',
+    'previous_response_id',
+    'tool_usage'
+  ];
+  primary.forEach(key => {
+    if (Object.prototype.hasOwnProperty.call(value, key)) result[key] = value[key];
+  });
+  Object.entries(value).forEach(([key, item]) => {
+    if (!Object.prototype.hasOwnProperty.call(result, key) && !RESPONSE_CONFIG_FIELDS.has(key)) {
+      result[key] = item;
+    }
+  });
+  return result;
+}
+
+function jsonObjectMeta(value) {
+  const parts = [];
+  if (value.type) parts.push(String(value.type));
+  if (value.role) parts.push(String(value.role));
+  if (value.name) parts.push(String(value.name));
+  if (value.status) parts.push(String(value.status));
+  return parts.slice(0, 4).join(' · ');
+}
+
+function jsonArrayMeta(value) {
+  const counts = new Map();
+  for (const item of value) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+    const label = item.role || item.type || '';
+    if (!label) continue;
+    counts.set(label, (counts.get(label) || 0) + 1);
+  }
+  return [...counts.entries()]
+    .sort((left, right) => right[1] - left[1])
+    .slice(0, 6)
+    .map(([label, count]) => `${label} ${count}`)
+    .join(' · ');
 }
 
 function isJsonNodeOpen(nodeKey, depth) {
