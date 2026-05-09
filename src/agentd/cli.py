@@ -7,13 +7,19 @@ import sys
 import time
 from pathlib import Path
 
-from .config import AgentdConfig, load_config
+from .config import (
+    PROJECT_ROOT,
+    AgentdConfig,
+    default_config_path,
+    default_context_dir,
+    default_home_dir,
+    load_config,
+)
 from .context import ContextResolver, split_skill_names
 from .daemon import AgentDaemon
 from .models import IncomingMessage
 from .registry import Registry
 from .title import TITLE_DISPLAY_WIDTH, normalize_title
-
 
 DEFAULT_DEFER_SECONDS = 10.0
 
@@ -22,6 +28,14 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog='agentd')
     parser.add_argument('--config', help='path to agentd TOML config')
     sub = parser.add_subparsers(dest='command', required=True)
+
+    init = sub.add_parser('init', help='initialize local agentd config and context skeleton')
+    init.add_argument('--home-dir', default='', help='agentd home directory; defaults to ~/.agentd')
+    init.add_argument('--context-dir', default='', help='user context directory; defaults to ~/agent-context')
+    init.add_argument('--source-dir', default='', help='agentd source tree; defaults to this repository')
+    init.add_argument('--executable', default='.venv/bin/agentd', help='agentd executable path relative to source-dir')
+    init.add_argument('--codex-command', default='codex', help='Codex command to put in agentd.toml')
+    init.add_argument('--overwrite', action='store_true', help='overwrite existing bootstrap files')
 
     serve = sub.add_parser('serve', help='start Feishu websocket listener')
     serve.add_argument('--dry-send', action='store_true', help='print replies instead of sending to Feishu')
@@ -92,6 +106,9 @@ def main(argv: list[str] | None = None) -> int:
     web.add_argument('--port', type=int, default=8765)
 
     args = parser.parse_args(argv)
+    if args.command == 'init':
+        return init_request(args)
+
     config = load_config(args.config)
     configure_logging(config.log_level)
     config.state_dir.mkdir(parents=True, exist_ok=True)
@@ -136,6 +153,36 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == 'set-title':
         return set_title_request(config, args)
     parser.error('unreachable')
+
+
+def init_request(args: argparse.Namespace) -> int:
+    from .bootstrap import BootstrapOptions, init_agentd
+
+    home_dir = Path(args.home_dir).expanduser().resolve() if args.home_dir else default_home_dir()
+    context_dir = Path(args.context_dir).expanduser().resolve() if args.context_dir else default_context_dir()
+    source_dir = Path(args.source_dir).expanduser().resolve() if args.source_dir else PROJECT_ROOT
+    config_path = Path(args.config).expanduser().resolve() if args.config else default_config_path()
+
+    result = init_agentd(
+        BootstrapOptions(
+            config_path=config_path,
+            home_dir=home_dir,
+            context_dir=context_dir,
+            source_dir=source_dir,
+            executable=str(args.executable or '.venv/bin/agentd'),
+            codex_command=str(args.codex_command or 'codex'),
+            overwrite=bool(args.overwrite),
+        )
+    )
+    print(f'config_path={config_path}')
+    print(f'context_dir={context_dir}')
+    for path in result.created:
+        print(f'created {path}')
+    for path in result.skipped:
+        print(f'skipped existing {path}')
+    print('next: fill Feishu credentials or export AGENTD_FEISHU_APP_ID/AGENTD_FEISHU_APP_SECRET')
+    print(f'next: uv run agentd --config {config_path} config-check')
+    return 0
 
 
 def configure_logging(level: str) -> None:

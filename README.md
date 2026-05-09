@@ -16,8 +16,8 @@ This creates `.venv/` and installs `lark-oapi` for the Feishu WebSocket listener
 
 There are two supported setup paths:
 
-- Agent-guided setup: paste the prompt below into Codex from this repository root and let the agent create the local config and context skeleton.
-- Manual setup: run the commands in the next section yourself.
+- Agent-guided setup: paste the prompt below into Codex from this repository root and let the agent run `agentd init`, validate config, and guide service installation.
+- Manual setup: run `agentd init` yourself, or create the same files by hand.
 
 Agent-guided setup prompt:
 
@@ -26,9 +26,8 @@ Help me set up agentd on this machine from the current cloned repository.
 
 Goals:
 - Install Python dependencies with uv.
-- Create ~/.agentd/agentd.toml if it does not exist.
-- Create ~/agent-context as my private context directory if it does not exist.
-- Initialize context.toml, schedules.toml, CONTEXT.md, memory/MEMORY.md, memory/projects/, and skills/.
+- Run `uv run agentd --config ~/.agentd/agentd.toml init` to create ~/.agentd/agentd.toml and ~/agent-context if they do not exist.
+- Initialize context.toml, schedules.toml, CONTEXT.md, memory/MEMORY.md, memory/projects/, and skills/ through that command.
 - Keep secrets out of Git by default; use environment variables or tell me exactly where to edit app_id/app_secret.
 - Set agentd.source_dir to this repository path and agentd.executable to .venv/bin/agentd.
 - Run config-check and explain any missing values.
@@ -42,7 +41,25 @@ Constraints:
 
 ## Config
 
-Manual setup starts by creating local config files and filling secrets outside Git. `~/.agentd` is for agentd's own state; the context directory can be a separate user-managed git repo:
+Manual setup starts by creating local config files and filling secrets outside Git. `~/.agentd` is for agentd's own state; the context directory can be a separate user-managed git repo.
+
+The recommended manual path is the init command:
+
+```bash
+uv sync --dev
+uv run agentd --config ~/.agentd/agentd.toml init
+```
+
+This creates `~/.agentd/agentd.toml` and a conservative `~/agent-context` skeleton without overwriting existing files. Use flags when you want custom paths:
+
+```bash
+uv run agentd --config ~/.agentd/agentd.toml init \
+  --home-dir ~/.agentd \
+  --context-dir ~/agent-context \
+  --source-dir "$(pwd)"
+```
+
+If you prefer to do the same setup completely by hand:
 
 ```bash
 mkdir -p ~/.agentd ~/agent-context
