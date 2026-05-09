@@ -590,6 +590,7 @@ class Registry:
         *,
         session_id: int | None = None,
         codex_thread_id: str = '',
+        codex_turn_id: str = '',
         limit: int = 200,
     ) -> list[sqlite3.Row]:
         conditions: list[str] = []
@@ -600,6 +601,9 @@ class Registry:
         if codex_thread_id:
             conditions.append('codex_thread_id = ?')
             params.append(codex_thread_id)
+        if codex_turn_id:
+            conditions.append('codex_turn_id = ?')
+            params.append(codex_turn_id)
         where = f'where {" and ".join(conditions)}' if conditions else ''
         params.append(limit)
         with self.connect() as conn:
@@ -618,6 +622,10 @@ class Registry:
                 params,
             ).fetchall()
         return rows
+
+    def get_model_http_exchange(self, exchange_id: str) -> sqlite3.Row | None:
+        with self.connect() as conn:
+            return conn.execute('select * from model_http_exchanges where id = ?', (exchange_id,)).fetchone()
 
     def mark_card_dirty(self, run_id: int) -> None:
         now = int(time.time())

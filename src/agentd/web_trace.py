@@ -1,78 +1,30 @@
 from __future__ import annotations
 
-import hashlib
+import gzip
+import io
 import json
 import sqlite3
 import tarfile
-from dataclasses import dataclass, field
+import zlib
 from pathlib import Path
 from typing import Any
 
 
-@dataclass
-class TraceNode:
-    id: str
-    generated_by: str
-    message: dict[str, Any]
-    children: list[TraceNode] = field(default_factory=list)
-    request: dict[str, Any] | None = None
-
-
-class ResponsesTraceBuilder:
-    def __init__(self) -> None:
-        self.root = TraceNode(
-            id='root',
-            generated_by='unknown',
-            message={'role': 'system', 'content': ''},
-        )
-
-    def add_exchange(self, exchange: dict[str, Any]) -> None:
-        request = exchange.get('request_json')
-        if not isinstance(request, dict):
-            return
-        input_items = request.get('input')
-        if not isinstance(input_items, list):
-            return
-
-        current = self.root
-        for item in input_items:
-            if not isinstance(item, dict):
-                continue
-            current = self._child_for(current, normalize_message(item), generated_by='unknown')
-
-        response_message = exchange.get('response_message')
-        if not isinstance(response_message, dict):
-            response_message = {'role': 'assistant', 'content': ''}
-        node = TraceNode(
-            id=stable_node_id(response_message, exchange.get('id')),
-            generated_by='llm',
-            message=response_message,
-            request=exchange_summary(exchange),
-        )
-        current.children.append(node)
-
-    def _child_for(self, parent: TraceNode, message: dict[str, Any], *, generated_by: str) -> TraceNode:
-        fingerprint = message_fingerprint(message)
-        for child in parent.children:
-            if message_fingerprint(child.message) == fingerprint:
-                return child
-        node = TraceNode(id=stable_node_id(message, len(parent.children)), generated_by=generated_by, message=message)
-        parent.children.append(node)
-        return node
-
-    def to_dict(self) -> dict[str, Any]:
-        return trace_node_to_dict(self.root)
-
-
 def build_responses_trace(rows: list[sqlite3.Row]) -> dict[str, Any]:
-    builder = ResponsesTraceBuilder()
     exchanges: list[dict[str, Any]] = []
     for row in rows:
         exchange = load_exchange(row)
         exchanges.append(exchange_summary(exchange))
-        builder.add_exchange(exchange)
     return {
-        'root': builder.to_dict(),
+        'root': {
+            'id': 'root',
+            'generated_by': 'unknown',
+            'role': 'system',
+            'content': '',
+            'message': {'role': 'system', 'content': ''},
+            'request': None,
+            'children': [],
+        },
         'exchanges': exchanges,
     }
 
@@ -102,11 +54,28 @@ def load_exchange(row: sqlite3.Row) -> dict[str, Any]:
         'archive_member_request': row_value(row, 'archive_member_request'),
         'archive_member_response': row_value(row, 'archive_member_response'),
         'request_json': request_json,
+        'response_text': response['text'],
         'response_message': {'role': 'assistant', 'content': response['text']},
         'usage': response['usage'],
         'error': row_value(row, 'error'),
         'has_request_capture': bool(request_bytes),
         'has_response_capture': bool(response_bytes),
+    }
+
+
+def exchange_detail(exchange: dict[str, Any]) -> dict[str, Any]:
+    request_json = exchange.get('request_json')
+    input_items = normalize_input_items(request_json.get('input')) if isinstance(request_json, dict) else []
+    return {
+        **exchange_summary(exchange),
+        'upstream_url': exchange.get('upstream_url'),
+        'provider_id': exchange.get('provider_id'),
+        'request_json': request_json,
+        'request_input_count': len(input_items),
+        'request_input_items': [
+            request_input_item_detail(item, index) for index, item in enumerate(input_items) if isinstance(item, dict)
+        ],
+        'response_text': exchange.get('response_text') or '',
     }
 
 
@@ -154,10 +123,53 @@ def read_tar_zst_member(archive_path: Path, member_name: str) -> bytes:
 def http_body(raw: bytes) -> bytes:
     if not raw:
         return b''
+    headers, body = split_http_message(raw)
+    decoded = decode_http_body(body, headers.get('content-encoding', ''))
+    return decoded if decoded is not None else body
+
+
+def split_http_message(raw: bytes) -> tuple[dict[str, str], bytes]:
     for marker in (b'\r\n\r\n', b'\n\n'):
         if marker in raw:
-            return raw.split(marker, 1)[1]
-    return raw
+            head, body = raw.split(marker, 1)
+            return parse_http_headers(head), body
+    return {}, raw
+
+
+def parse_http_headers(head: bytes) -> dict[str, str]:
+    headers: dict[str, str] = {}
+    lines = head.decode('utf-8', errors='replace').splitlines()
+    for line in lines[1:]:
+        if ':' not in line:
+            continue
+        key, value = line.split(':', 1)
+        headers[key.strip().lower()] = value.strip()
+    return headers
+
+
+def decode_http_body(body: bytes, content_encoding: str) -> bytes | None:
+    encodings = [part.strip().lower() for part in content_encoding.split(',') if part.strip()]
+    if not encodings or encodings == ['identity']:
+        return body
+
+    decoded = body
+    for encoding in reversed(encodings):
+        if encoding == 'identity':
+            continue
+        if encoding == 'gzip':
+            decoded = gzip.decompress(decoded)
+        elif encoding == 'deflate':
+            decoded = zlib.decompress(decoded)
+        elif encoding == 'zstd':
+            try:
+                import zstandard
+            except ModuleNotFoundError:
+                return None
+            with zstandard.ZstdDecompressor().stream_reader(io.BytesIO(decoded)) as reader:
+                decoded = reader.read()
+        else:
+            return None
+    return decoded
 
 
 def parse_json_bytes(raw: bytes) -> dict[str, Any] | None:
@@ -168,6 +180,14 @@ def parse_json_bytes(raw: bytes) -> dict[str, Any] | None:
     except (json.JSONDecodeError, UnicodeDecodeError):
         return None
     return value if isinstance(value, dict) else None
+
+
+def normalize_input_items(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        return [{'role': 'user', 'content': value}]
+    return []
 
 
 def parse_response_body(raw: bytes) -> dict[str, Any]:
@@ -213,64 +233,9 @@ def iter_sse_payloads(raw: bytes) -> list[dict[str, Any]]:
     return payloads
 
 
-def normalize_message(message: dict[str, Any]) -> dict[str, Any]:
-    role = str(message.get('role') or message.get('type') or 'message')
-    normalized: dict[str, Any] = {
-        'role': role,
-        'content': normalize_content(message.get('content')),
-    }
-    for key in ('name', 'call_id'):
-        if message.get(key):
-            normalized[key] = message[key]
-    return normalized
-
-
-def normalize_content(content: Any) -> Any:
-    if isinstance(content, str):
-        return ' '.join(content.split())
-    if isinstance(content, list):
-        return [normalize_content_item(item) for item in content]
-    if isinstance(content, dict):
-        return normalize_content_item(content)
-    return content
-
-
-def normalize_content_item(item: Any) -> Any:
-    if not isinstance(item, dict):
-        return normalize_content(item)
-    result: dict[str, Any] = {}
-    for key in ('type', 'text', 'content', 'name', 'arguments'):
-        if key in item:
-            result[key] = normalize_content(item[key])
-    return result or {
-        key: normalize_content(value) for key, value in sorted(item.items()) if key not in {'id', 'index'}
-    }
-
-
-def message_fingerprint(message: dict[str, Any]) -> str:
-    raw = json.dumps(normalize_message(message), ensure_ascii=False, sort_keys=True, separators=(',', ':'))
-    return hashlib.sha256(raw.encode('utf-8')).hexdigest()
-
-
-def stable_node_id(message: dict[str, Any], salt: object) -> str:
-    raw = json.dumps({'message': normalize_message(message), 'salt': str(salt)}, ensure_ascii=False, sort_keys=True)
-    return hashlib.sha1(raw.encode('utf-8')).hexdigest()[:16]
-
-
-def trace_node_to_dict(node: TraceNode) -> dict[str, Any]:
-    return {
-        'id': node.id,
-        'generated_by': node.generated_by,
-        'role': str(node.message.get('role') or ''),
-        'content': display_message_content(node.message),
-        'message': node.message,
-        'request': node.request,
-        'children': [trace_node_to_dict(child) for child in node.children],
-    }
-
-
 def exchange_summary(exchange: dict[str, Any]) -> dict[str, Any]:
     usage = exchange.get('usage') if isinstance(exchange.get('usage'), dict) else {}
+    response_text = str(exchange.get('response_text') or '')
     return {
         'id': exchange.get('id'),
         'created_at': exchange.get('created_at'),
@@ -290,11 +255,38 @@ def exchange_summary(exchange: dict[str, Any]) -> dict[str, Any]:
         'has_request_capture': exchange.get('has_request_capture'),
         'has_response_capture': exchange.get('has_response_capture'),
         'error': exchange.get('error'),
+        'response_preview': compact_text(response_text, 180),
     }
 
 
-def display_message_content(message: dict[str, Any]) -> str:
-    return content_to_text(message.get('content'))
+def request_input_item_detail(item: dict[str, Any], index: int) -> dict[str, Any]:
+    return {
+        'index': index,
+        'role': str(item.get('role') or item.get('type') or 'item'),
+        'type': str(item.get('type') or ''),
+        'content': display_request_item_content(item),
+    }
+
+
+def display_request_item_content(item: dict[str, Any]) -> str:
+    content_text = content_to_text(item.get('content')).strip()
+    if content_text:
+        return content_text
+
+    fields: dict[str, Any] = {}
+    for key in ('name', 'call_id', 'arguments', 'output', 'summary', 'result', 'error', 'text'):
+        value = item.get(key)
+        if value not in (None, '', [], {}):
+            fields[key] = value
+    if fields:
+        return json.dumps(fields, ensure_ascii=False, sort_keys=True)
+
+    fallback = {
+        key: value
+        for key, value in sorted(item.items())
+        if key not in {'id', 'type', 'role', 'status', 'content'} and value not in (None, '', [], {})
+    }
+    return json.dumps(fallback, ensure_ascii=False, sort_keys=True) if fallback else ''
 
 
 def content_to_text(content: Any) -> str:
@@ -311,6 +303,11 @@ def content_to_text(content: Any) -> str:
     if content is None:
         return ''
     return str(content)
+
+
+def compact_text(value: str, limit: int) -> str:
+    text = ' '.join(str(value or '').split())
+    return text if len(text) <= limit else text[: limit - 6] + ' ...(截断)'
 
 
 def extract_response_text(payload: Any) -> str:

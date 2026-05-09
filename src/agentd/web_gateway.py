@@ -12,7 +12,7 @@ from urllib.parse import parse_qs, urlparse
 from .config import AgentdConfig
 from .models import IncomingMessage
 from .registry import Registry
-from .web_trace import build_responses_trace
+from .web_trace import build_responses_trace, exchange_detail, load_exchange
 
 
 class WebGateway:
@@ -81,6 +81,15 @@ class WebGatewayHandler(BaseHTTPRequestHandler):
             query = parse_qs(parsed.query)
             run_id = parse_int(first(query.get('run_id')))
             self._send_json(build_state(self.owner.registry, selected_run_id=run_id))
+            return
+        if parsed.path == '/api/exchange':
+            query = parse_qs(parsed.query)
+            exchange_id = first(query.get('id'))
+            row = self.owner.registry.get_model_http_exchange(exchange_id)
+            if row is None:
+                self._send_json({'ok': False, 'error': 'exchange not found'}, status=HTTPStatus.NOT_FOUND)
+                return
+            self._send_json({'ok': True, 'exchange': exchange_detail(load_exchange(row))})
             return
         self.send_error(HTTPStatus.NOT_FOUND, 'not found')
 
@@ -164,6 +173,7 @@ def build_state(registry: Registry, *, selected_run_id: int | None = None) -> di
     trace_rows = registry.list_model_http_exchanges(
         session_id=selected.session_id if selected is not None else None,
         codex_thread_id=selected.codex_thread_id if selected is not None else '',
+        codex_turn_id=selected.turn_id if selected is not None else '',
         limit=250,
     )
     trace = build_responses_trace(trace_rows)
@@ -340,8 +350,25 @@ INDEX_HTML = r"""<!doctype html>
     .message.system { border-left: 3px solid var(--muted); }
     .role { font-size: 12px; color: var(--muted); margin-bottom: 4px; }
     .content { white-space: pre-wrap; }
-    .trace-node { margin-left: calc(var(--depth) * 16px); }
+    .trace-node { margin-left: min(calc(var(--depth) * 16px), 128px); }
     .trace-node.llm { border-left: 3px solid var(--ok); }
+    .exchange { border-left: 3px solid var(--ok); }
+    .exchange summary { cursor: pointer; list-style-position: inside; }
+    .exchange-title { font-weight: 650; }
+    .exchange-preview { margin-top: 8px; color: var(--muted); font-size: 12px; }
+    .exchange-detail { margin-top: 10px; }
+    .json {
+      max-height: 360px;
+      overflow: auto;
+      white-space: pre-wrap;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 12px;
+      line-height: 1.45;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 10px;
+      background: rgba(127, 127, 127, 0.06);
+    }
     .request-meta {
       margin-top: 8px;
       padding-top: 8px;
@@ -384,7 +411,7 @@ INDEX_HTML = r"""<!doctype html>
     </form>
   </section>
   <section class="trace">
-    <header><h2>请求树</h2><span id="traceStats" class="muted"></span></header>
+    <header><h2>模型请求</h2><span id="traceStats" class="muted"></span></header>
     <div id="trace" class="scroll"></div>
   </section>
 </main>
@@ -392,6 +419,8 @@ INDEX_HTML = r"""<!doctype html>
 let selectedRunId = null;
 let selectedSessionId = null;
 let sending = false;
+let openExchangeIds = new Set();
+const exchangeDetailCache = new Map();
 
 function esc(value) {
   return String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
@@ -469,23 +498,104 @@ function renderTrace(trace) {
   const root = document.getElementById('trace');
   const exchanges = trace.exchanges || [];
   document.getElementById('traceStats').textContent = `${exchanges.length} requests`;
-  const nodes = [];
-  function walk(node, depth) {
-    if (!node || node.id === 'root') {
-      for (const child of (node && node.children) || []) walk(child, depth);
-      return;
-    }
-    const request = node.request || null;
-    const meta = request ? requestMeta(request) : '';
-    nodes.push(`<div class="trace-node ${node.generated_by === 'llm' ? 'llm' : ''}" style="--depth:${depth}">
-      <div class="role">${esc(node.role || node.generated_by)}</div>
-      <div class="content">${esc(compact(node.content || '', 900))}</div>
-      ${meta}
-    </div>`);
-    for (const child of node.children || []) walk(child, depth + 1);
+  if (!exchanges.length) {
+    root.innerHTML = '<div class="empty">暂无请求捕获</div>';
+    return;
   }
-  walk(trace.root, 0);
-  root.innerHTML = nodes.length ? nodes.join('') : '<div class="empty">暂无请求捕获</div>';
+  root.innerHTML = exchanges.map(exchange => renderExchangeSummary(exchange, openExchangeIds.has(String(exchange.id || '')))).join('');
+  root.querySelectorAll('details[data-exchange-id]').forEach(details => {
+    details.addEventListener('toggle', () => {
+      const id = details.dataset.exchangeId || '';
+      if (details.open) {
+        openExchangeIds.add(id);
+        loadExchangeDetail(details);
+      } else {
+        openExchangeIds.delete(id);
+      }
+    });
+    if (details.open) loadExchangeDetail(details);
+  });
+}
+
+function renderExchangeSummary(exchange, open) {
+  const time = exchange.created_at ? new Date(exchange.created_at * 1000).toLocaleTimeString() : 'request';
+  const title = `${time} · ${exchange.model || 'model'} · HTTP ${exchange.status_code || '?'}`;
+  const preview = exchange.error || exchange.response_preview || exchange.request_path || '';
+  return `<details class="exchange" data-exchange-id="${esc(exchange.id || '')}" ${open ? 'open' : ''}>
+    <summary>
+      <span class="exchange-title">${esc(title)}</span>
+      ${requestMeta(exchange)}
+      ${preview ? `<div class="exchange-preview">${esc(compact(preview, 260))}</div>` : ''}
+    </summary>
+    <div class="exchange-detail muted">加载中</div>
+  </details>`;
+}
+
+async function loadExchangeDetail(details) {
+  const id = details.dataset.exchangeId || '';
+  const root = details.querySelector('.exchange-detail');
+  if (exchangeDetailCache.has(id)) {
+    root.classList.remove('muted');
+    root.innerHTML = renderExchangeDetail(exchangeDetailCache.get(id));
+    details.dataset.loaded = '1';
+    return;
+  }
+  if (details.dataset.loaded === '1' || details.dataset.loading === '1') return;
+  details.dataset.loading = '1';
+  root.textContent = '加载中';
+  try {
+    const response = await fetch(`/api/exchange?id=${encodeURIComponent(id)}`, {cache: 'no-store'});
+    const result = await response.json();
+    if (!response.ok || !result.ok) throw new Error(result.error || 'load failed');
+    exchangeDetailCache.set(id, result.exchange || {});
+    root.classList.remove('muted');
+    root.innerHTML = renderExchangeDetail(result.exchange || {});
+    details.dataset.loaded = '1';
+  } catch (error) {
+    root.classList.add('muted');
+    root.textContent = error.message || String(error);
+  } finally {
+    details.dataset.loading = '';
+  }
+}
+
+function renderExchangeDetail(exchange) {
+  const inputItems = exchange.request_input_items || [];
+  const inputHtml = inputItems.length
+    ? inputItems.map(item => `<div class="message ${roleClass(item.role)}">
+        <div class="role">#${esc(item.index)} ${esc(item.role || 'item')}${item.type ? ' · ' + esc(item.type) : ''}</div>
+        <div class="content">${esc(item.content || '(empty)')}</div>
+      </div>`).join('')
+    : '<div class="empty">无 request input</div>';
+  const responseText = exchange.response_text || '';
+  const rawRequest = exchange.request_json ? JSON.stringify(exchange.request_json, null, 2) : '';
+  return `
+    <div class="request-meta">
+      <span>input items ${esc(exchange.request_input_count || 0)}</span>
+      ${exchange.upstream_url ? `<span>${esc(exchange.upstream_url)}</span>` : ''}
+      ${exchange.codex_turn_id ? `<span>turn ${esc(exchange.codex_turn_id)}</span>` : ''}
+    </div>
+    <div class="message assistant">
+      <div class="role">response</div>
+      <div class="content">${esc(responseText || '(empty)')}</div>
+    </div>
+    <details>
+      <summary>request input</summary>
+      ${inputHtml}
+    </details>
+    <details>
+      <summary>raw request JSON</summary>
+      <pre class="json">${esc(rawRequest || '{}')}</pre>
+    </details>
+  `;
+}
+
+function roleClass(role) {
+  const value = String(role || '');
+  if (value.includes('user')) return 'user';
+  if (value.includes('assistant')) return 'assistant';
+  if (value.includes('system') || value.includes('developer')) return 'system';
+  return 'event';
 }
 
 function requestMeta(request) {
