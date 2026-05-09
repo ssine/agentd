@@ -27,6 +27,18 @@ def obj_get(obj: Any, *keys: str) -> Any:
     return current
 
 
+def message_id_from_result(result: dict[str, Any]) -> str:
+    data = result.get('data') if isinstance(result.get('data'), dict) else result
+    value = data.get('message_id') if isinstance(data, dict) else None
+    return value if isinstance(value, str) else ''
+
+
+def thread_id_from_result(result: dict[str, Any]) -> str:
+    data = result.get('data') if isinstance(result.get('data'), dict) else result
+    value = data.get('thread_id') if isinstance(data, dict) else None
+    return value if isinstance(value, str) else ''
+
+
 def message_text(message: Any) -> str:
     raw = obj_get(message, 'content')
     msg_type = obj_get(message, 'message_type') or obj_get(message, 'msg_type')

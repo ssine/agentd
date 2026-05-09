@@ -8,7 +8,16 @@ from typing import Any
 
 from .capture_proxy import ensure_model_http_exchanges_schema
 from .context import split_skill_names
-from .models import AgentSession, FeishuOutboxItem, RunEvent, RunRecord, SpawnRequest, TitleRequest
+from .models import (
+    AgentSession,
+    ChannelBindingRecord,
+    DeliveryRecord,
+    FeishuOutboxItem,
+    RunEvent,
+    RunRecord,
+    SpawnRequest,
+    TitleRequest,
+)
 
 
 class ClosingConnection(sqlite3.Connection):
@@ -42,6 +51,8 @@ class Registry:
                     thread_id text,
                     root_message_id text,
                     codex_thread_id text,
+                    runner_kind text not null default '',
+                    runner_session_ref text,
                     cwd text not null,
                     context_profile text not null default '',
                     skills text not null default '',
@@ -106,6 +117,9 @@ class Registry:
                     status_message_id text not null default '',
                     codex_thread_id text not null default '',
                     turn_id text not null default '',
+                    runner_kind text not null default '',
+                    runner_session_ref text not null default '',
+                    runner_turn_ref text not null default '',
                     subject text not null default '',
                     display_title text not null default '',
                     host text not null default '',
@@ -159,6 +173,45 @@ class Registry:
                 on card_projections(remote_message_id)
                 where remote_message_id != '';
 
+                create table if not exists channel_bindings (
+                    id integer primary key autoincrement,
+                    session_id integer not null unique,
+                    channel text not null,
+                    conversation_ref text not null,
+                    thread_ref text not null default '',
+                    root_message_ref text not null default '',
+                    metadata_json text not null default '{}',
+                    created_at integer not null,
+                    updated_at integer not null
+                );
+
+                create index if not exists channel_bindings_channel_conversation_idx
+                on channel_bindings(channel, conversation_ref, thread_ref);
+
+                create table if not exists deliveries (
+                    id integer primary key autoincrement,
+                    run_id integer,
+                    channel text not null,
+                    destination_ref text not null,
+                    thread_ref text not null default '',
+                    kind text not null,
+                    dedupe_key text not null unique,
+                    payload_json text not null default '{}',
+                    state text not null,
+                    attempts integer not null default 0,
+                    external_ref text not null default '',
+                    last_error text not null default '',
+                    created_at integer not null,
+                    updated_at integer not null,
+                    sent_at integer
+                );
+
+                create index if not exists deliveries_state_idx
+                on deliveries(state, updated_at);
+
+                create index if not exists deliveries_run_idx
+                on deliveries(run_id, id);
+
                 create table if not exists feishu_outbox (
                     id integer primary key autoincrement,
                     run_id integer,
@@ -181,7 +234,12 @@ class Registry:
             self._add_column_if_missing(conn, 'sessions', 'root_message_id', 'text')
             self._add_column_if_missing(conn, 'sessions', 'context_profile', "text not null default ''")
             self._add_column_if_missing(conn, 'sessions', 'skills', "text not null default ''")
+            self._add_column_if_missing(conn, 'sessions', 'runner_kind', "text not null default ''")
+            self._add_column_if_missing(conn, 'sessions', 'runner_session_ref', 'text')
             self._add_column_if_missing(conn, 'runs', 'sender_open_id', "text not null default ''")
+            self._add_column_if_missing(conn, 'runs', 'runner_kind', "text not null default ''")
+            self._add_column_if_missing(conn, 'runs', 'runner_session_ref', "text not null default ''")
+            self._add_column_if_missing(conn, 'runs', 'runner_turn_ref', "text not null default ''")
             self._add_column_if_missing(conn, 'spawn_requests', 'sender_open_id', "text not null default ''")
             self._add_column_if_missing(conn, 'spawn_requests', 'mode', "text not null default 'handoff'")
             self._add_column_if_missing(conn, 'spawn_requests', 'context_profile', "text not null default ''")
@@ -206,7 +264,14 @@ class Registry:
             conn.execute('insert into dedup(message_id, created_at) values(?, ?)', (message_id, now))
             return False
 
-    def get_main_session(self, chat_id: str, cwd: str) -> AgentSession:
+    def get_main_session(
+        self,
+        chat_id: str,
+        cwd: str,
+        *,
+        channel: str = '',
+        conversation_ref: str = '',
+    ) -> AgentSession:
         now = int(time.time())
         with self.connect() as conn:
             conn.execute(
@@ -220,14 +285,22 @@ class Registry:
                 'select * from sessions where chat_id = ? and thread_id is null',
                 (chat_id,),
             ).fetchone()
+            self._ensure_channel_binding_for_row(
+                conn,
+                row,
+                channel=channel,
+                conversation_ref=conversation_ref,
+            )
         return self._session_from_row(row)
 
-    def get_thread_session(self, chat_id: str, thread_id: str) -> AgentSession | None:
+    def get_thread_session(self, chat_id: str, thread_id: str, *, channel: str = '') -> AgentSession | None:
         with self.connect() as conn:
             row = conn.execute(
                 'select * from sessions where chat_id = ? and thread_id = ?',
                 (chat_id, thread_id),
             ).fetchone()
+            if row is not None:
+                self._ensure_channel_binding_for_row(conn, row, channel=channel)
         return self._session_from_row(row) if row else None
 
     def bind_child_session(
@@ -240,6 +313,8 @@ class Registry:
         parent_id: int | None = None,
         context_profile: str = '',
         skills: tuple[str, ...] = (),
+        channel: str = '',
+        conversation_ref: str = '',
     ) -> AgentSession:
         now = int(time.time())
         with self.connect() as conn:
@@ -266,10 +341,25 @@ class Registry:
                 'select * from sessions where chat_id = ? and thread_id = ?',
                 (chat_id, thread_id),
             ).fetchone()
+            self._ensure_channel_binding_for_row(
+                conn,
+                row,
+                channel=channel,
+                conversation_ref=conversation_ref,
+                root_message_ref=root_message_id,
+            )
         return self._session_from_row(row)
 
     def get_schedule_session(
-        self, chat_id: str, job_id: str, cwd: str, *, context_profile: str = '', skills: tuple[str, ...] = ()
+        self,
+        chat_id: str,
+        job_id: str,
+        cwd: str,
+        *,
+        context_profile: str = '',
+        skills: tuple[str, ...] = (),
+        channel: str = '',
+        conversation_ref: str = '',
     ) -> AgentSession:
         now = int(time.time())
         thread_id = f'schedule:{job_id}'
@@ -296,18 +386,97 @@ class Registry:
                 'select * from sessions where chat_id = ? and thread_id = ?',
                 (chat_id, thread_id),
             ).fetchone()
+            self._ensure_channel_binding_for_row(
+                conn,
+                row,
+                channel=channel,
+                conversation_ref=conversation_ref,
+            )
         return self._session_from_row(row)
 
     def update_codex_thread(self, session_id: int, codex_thread_id: str) -> None:
+        self.update_runner_session(session_id, codex_thread_id, runner_kind='codex')
+
+    def update_runner_session(self, session_id: int, runner_session_ref: str, *, runner_kind: str = '') -> None:
+        now = int(time.time())
         with self.connect() as conn:
             conn.execute(
-                'update sessions set codex_thread_id = ?, updated_at = ? where id = ?',
-                (codex_thread_id, int(time.time()), session_id),
+                """
+                update sessions
+                set runner_kind = coalesce(nullif(?, ''), runner_kind),
+                    runner_session_ref = ?,
+                    codex_thread_id = ?,
+                    updated_at = ?
+                where id = ?
+                """,
+                (runner_kind, runner_session_ref, runner_session_ref, now, session_id),
             )
+
+    def bind_session_channel(
+        self,
+        session_id: int,
+        *,
+        channel: str,
+        conversation_ref: str,
+        thread_ref: str = '',
+        root_message_ref: str = '',
+        metadata: dict[str, Any] | None = None,
+    ) -> ChannelBindingRecord:
+        now = int(time.time())
+        payload_json = json.dumps(metadata or {}, ensure_ascii=False, sort_keys=True)
+        with self.connect() as conn:
+            conn.execute(
+                """
+                insert into channel_bindings(
+                    session_id,
+                    channel,
+                    conversation_ref,
+                    thread_ref,
+                    root_message_ref,
+                    metadata_json,
+                    created_at,
+                    updated_at
+                )
+                values(?, ?, ?, ?, ?, ?, ?, ?)
+                on conflict(session_id) do update set
+                    channel = excluded.channel,
+                    conversation_ref = excluded.conversation_ref,
+                    thread_ref = excluded.thread_ref,
+                    root_message_ref = coalesce(nullif(excluded.root_message_ref, ''), root_message_ref),
+                    metadata_json = excluded.metadata_json,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    session_id,
+                    self._normalize_channel(channel),
+                    conversation_ref,
+                    thread_ref,
+                    root_message_ref,
+                    payload_json,
+                    now,
+                    now,
+                ),
+            )
+            row = conn.execute('select * from channel_bindings where session_id = ?', (session_id,)).fetchone()
+        return self._channel_binding_from_row(row)
+
+    def get_channel_binding(self, session_id: int) -> ChannelBindingRecord | None:
+        with self.connect() as conn:
+            row = conn.execute('select * from channel_bindings where session_id = ?', (session_id,)).fetchone()
+            if row is not None:
+                return self._channel_binding_from_row(row)
+            session = conn.execute('select * from sessions where id = ?', (session_id,)).fetchone()
+            if session is None:
+                return None
+            self._ensure_channel_binding_for_row(conn, session)
+            row = conn.execute('select * from channel_bindings where session_id = ?', (session_id,)).fetchone()
+        return self._channel_binding_from_row(row) if row else None
 
     def get_session(self, session_id: int) -> AgentSession | None:
         with self.connect() as conn:
             row = conn.execute('select * from sessions where id = ?', (session_id,)).fetchone()
+            if row is not None:
+                self._ensure_channel_binding_for_row(conn, row)
         return self._session_from_row(row) if row else None
 
     def create_run(
@@ -325,6 +494,7 @@ class Registry:
         status: str = '启动 Codex',
         status_phase: str = 'running',
         state: str = 'running',
+        runner_kind: str = '',
         status_message_id: str = '',
         status_reply_in_thread: bool = False,
         lease_seconds: int = 30,
@@ -342,6 +512,7 @@ class Registry:
                     status_phase,
                     status,
                     status_message_id,
+                    runner_kind,
                     subject,
                     display_title,
                     host,
@@ -354,7 +525,7 @@ class Registry:
                     created_at,
                     updated_at
                 )
-                values(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                values(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     session_id,
@@ -365,6 +536,7 @@ class Registry:
                     status_phase,
                     status,
                     status_message_id,
+                    runner_kind,
                     subject,
                     display_title,
                     host,
@@ -481,6 +653,9 @@ class Registry:
             'status_message_id',
             'codex_thread_id',
             'turn_id',
+            'runner_kind',
+            'runner_session_ref',
+            'runner_turn_ref',
             'subject',
             'display_title',
             'host',
@@ -740,7 +915,143 @@ class Registry:
                     error = excluded.error,
                     updated_at = excluded.updated_at
                 """,
-                (run_id, error, now),
+                    (run_id, error, now),
+            )
+
+    def upsert_delivery(
+        self,
+        *,
+        channel: str,
+        destination_ref: str,
+        kind: str,
+        dedupe_key: str,
+        payload: dict[str, Any],
+        run_id: int | None = None,
+        thread_ref: str = '',
+        state: str = 'pending',
+        replace_sent: bool = True,
+    ) -> int:
+        now = int(time.time())
+        payload_json = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        with self.connect() as conn:
+            row = conn.execute('select * from deliveries where dedupe_key = ?', (dedupe_key,)).fetchone()
+            if row:
+                if str(row['state']) == 'sent' and not replace_sent:
+                    return int(row['id'])
+                conn.execute(
+                    """
+                    update deliveries
+                    set run_id = ?,
+                        channel = ?,
+                        destination_ref = ?,
+                        thread_ref = ?,
+                        kind = ?,
+                        payload_json = ?,
+                        state = ?,
+                        attempts = 0,
+                        external_ref = '',
+                        last_error = '',
+                        updated_at = ?
+                    where id = ?
+                    """,
+                    (
+                        run_id,
+                        self._normalize_channel(channel),
+                        destination_ref,
+                        thread_ref,
+                        kind,
+                        payload_json,
+                        state,
+                        now,
+                        int(row['id']),
+                    ),
+                )
+                return int(row['id'])
+            cursor = conn.execute(
+                """
+                insert into deliveries(
+                    run_id,
+                    channel,
+                    destination_ref,
+                    thread_ref,
+                    kind,
+                    dedupe_key,
+                    payload_json,
+                    state,
+                    created_at,
+                    updated_at
+                )
+                values(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    self._normalize_channel(channel),
+                    destination_ref,
+                    thread_ref,
+                    kind,
+                    dedupe_key,
+                    payload_json,
+                    state,
+                    now,
+                    now,
+                ),
+            )
+            return int(cursor.lastrowid)
+
+    def get_delivery_by_dedupe_key(self, dedupe_key: str) -> DeliveryRecord | None:
+        with self.connect() as conn:
+            row = conn.execute('select * from deliveries where dedupe_key = ?', (dedupe_key,)).fetchone()
+        return self._delivery_from_row(row) if row else None
+
+    def list_deliveries(self, *, run_id: int | None = None, limit: int = 100) -> list[DeliveryRecord]:
+        where = ''
+        params: list[object] = []
+        if run_id is not None:
+            where = 'where run_id = ?'
+            params.append(run_id)
+        params.append(limit)
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"""
+                select *
+                from deliveries
+                {where}
+                order by updated_at desc, id desc
+                limit ?
+                """,
+                params,
+            ).fetchall()
+        return [self._delivery_from_row(row) for row in rows]
+
+    def mark_delivery_sent(self, delivery_id: int, *, external_ref: str = '') -> None:
+        now = int(time.time())
+        with self.connect() as conn:
+            conn.execute(
+                """
+                update deliveries
+                set state = 'sent',
+                    attempts = 0,
+                    external_ref = coalesce(nullif(?, ''), external_ref),
+                    last_error = '',
+                    sent_at = ?,
+                    updated_at = ?
+                where id = ?
+                """,
+                (external_ref, now, now, delivery_id),
+            )
+
+    def mark_delivery_failed(self, delivery_id: int, error: str) -> None:
+        now = int(time.time())
+        with self.connect() as conn:
+            conn.execute(
+                """
+                update deliveries
+                set state = 'failed',
+                    last_error = ?,
+                    updated_at = ?
+                where id = ?
+                """,
+                (error, now, delivery_id),
             )
 
     def upsert_outbox(
@@ -999,6 +1310,90 @@ class Registry:
             )
             return True
 
+    def _ensure_channel_binding_for_row(
+        self,
+        conn: sqlite3.Connection,
+        row: sqlite3.Row,
+        *,
+        channel: str = '',
+        conversation_ref: str = '',
+        root_message_ref: str = '',
+    ) -> None:
+        session_id = int(row['id'])
+        chat_id = str(row['chat_id'])
+        thread_ref = str(row['thread_id'] or '')
+        resolved_channel = self._normalize_channel(channel or self._legacy_channel_for_chat(chat_id))
+        resolved_conversation = conversation_ref or self._legacy_conversation_ref(resolved_channel, chat_id)
+        now = int(time.time())
+        conn.execute(
+            """
+            insert into channel_bindings(
+                session_id,
+                channel,
+                conversation_ref,
+                thread_ref,
+                root_message_ref,
+                metadata_json,
+                created_at,
+                updated_at
+            )
+            values(?, ?, ?, ?, ?, '{}', ?, ?)
+            on conflict(session_id) do update set
+                channel = case
+                    when ? != '' then excluded.channel
+                    else channel
+                end,
+                conversation_ref = case
+                    when ? != '' then excluded.conversation_ref
+                    else conversation_ref
+                end,
+                thread_ref = case
+                    when excluded.thread_ref != '' then excluded.thread_ref
+                    else thread_ref
+                end,
+                root_message_ref = case
+                    when excluded.root_message_ref != '' then excluded.root_message_ref
+                    else root_message_ref
+                end,
+                updated_at = excluded.updated_at
+            """,
+            (
+                session_id,
+                resolved_channel,
+                resolved_conversation,
+                thread_ref,
+                root_message_ref or str(row['root_message_id'] or ''),
+                now,
+                now,
+                channel,
+                conversation_ref,
+            ),
+        )
+
+    @staticmethod
+    def _normalize_channel(channel: str) -> str:
+        value = str(channel or '').strip().lower().replace('-', '_')
+        if value in {'claude', 'codex'}:
+            return 'feishu'
+        return value or 'feishu'
+
+    @staticmethod
+    def _legacy_channel_for_chat(chat_id: str) -> str:
+        value = str(chat_id or '')
+        if value == 'web' or value.startswith('web:'):
+            return 'web'
+        if value == 'wecom' or value.startswith('wecom:'):
+            return 'wecom'
+        return 'feishu'
+
+    @staticmethod
+    def _legacy_conversation_ref(channel: str, chat_id: str) -> str:
+        value = str(chat_id or '')
+        prefix = f'{channel}:'
+        if channel in {'web', 'wecom'} and value.startswith(prefix):
+            return value[len(prefix) :]
+        return value or channel
+
     @staticmethod
     def _db_value(value: object) -> object:
         if isinstance(value, bool):
@@ -1019,6 +1414,8 @@ class Registry:
             cwd=str(row['cwd']),
             context_profile=str(row['context_profile'] or ''),
             skills=split_skill_names(row['skills']),
+            runner_kind=str(row['runner_kind'] or ''),
+            runner_session_ref=str(row['runner_session_ref'] or row['codex_thread_id'] or '') or None,
         )
 
     @staticmethod
@@ -1058,6 +1455,9 @@ class Registry:
             lease_until=int(row['lease_until']),
             created_at=int(row['created_at']),
             updated_at=int(row['updated_at']),
+            runner_kind=str(row['runner_kind'] or ''),
+            runner_session_ref=str(row['runner_session_ref'] or row['codex_thread_id'] or ''),
+            runner_turn_ref=str(row['runner_turn_ref'] or row['turn_id'] or ''),
         )
 
     @staticmethod
@@ -1074,6 +1474,52 @@ class Registry:
             event_type=str(row['event_type']),
             payload=payload,
             created_at=int(row['created_at']),
+        )
+
+    @staticmethod
+    def _channel_binding_from_row(row: sqlite3.Row) -> ChannelBindingRecord:
+        try:
+            metadata = json.loads(str(row['metadata_json'] or '{}'))
+        except json.JSONDecodeError:
+            metadata = {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+        return ChannelBindingRecord(
+            id=int(row['id']),
+            session_id=int(row['session_id']),
+            channel=str(row['channel']),
+            conversation_ref=str(row['conversation_ref']),
+            thread_ref=str(row['thread_ref'] or ''),
+            root_message_ref=str(row['root_message_ref'] or ''),
+            metadata=metadata,
+            created_at=int(row['created_at']),
+            updated_at=int(row['updated_at']),
+        )
+
+    @staticmethod
+    def _delivery_from_row(row: sqlite3.Row) -> DeliveryRecord:
+        try:
+            payload = json.loads(str(row['payload_json'] or '{}'))
+        except json.JSONDecodeError:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        return DeliveryRecord(
+            id=int(row['id']),
+            run_id=int(row['run_id']) if row['run_id'] is not None else None,
+            channel=str(row['channel']),
+            destination_ref=str(row['destination_ref']),
+            thread_ref=str(row['thread_ref'] or ''),
+            kind=str(row['kind']),
+            dedupe_key=str(row['dedupe_key']),
+            payload=payload,
+            state=str(row['state']),
+            attempts=int(row['attempts']),
+            external_ref=str(row['external_ref'] or ''),
+            last_error=str(row['last_error'] or ''),
+            created_at=int(row['created_at']),
+            updated_at=int(row['updated_at']),
+            sent_at=int(row['sent_at']) if row['sent_at'] is not None else None,
         )
 
     @staticmethod
