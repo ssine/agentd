@@ -244,6 +244,36 @@ class DurableRunProjectionTest(unittest.TestCase):
             assert projected is not None
             self.assertEqual(projected.status_message_id, 'dry-run-status')
 
+    def test_startup_marks_changed_status_card_hash_dirty(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_dir:
+            root = Path(raw_dir)
+            config = make_config(root)
+            daemon = AgentDaemon(config, dry_send=True)
+            session = daemon.registry.get_main_session('chat-1', str(root))
+            run = daemon.registry.create_run(
+                session_id=session.id,
+                source_message_id='msg-1',
+                prompt='hello',
+                host='host-a',
+                subject='Codex',
+                display_title='Durable run',
+            )
+            daemon.registry.update_run(
+                run.id,
+                state='succeeded',
+                status_phase='done',
+                status='完成',
+                finished_at=int(time.time()),
+            )
+            daemon.registry.mark_card_sent(run.id, remote_message_id='card-1', render_hash='old-render-hash')
+
+            daemon._mark_changed_status_cards_dirty()
+
+            projection = daemon.registry.get_card_projection(run.id)
+            self.assertIsNotNone(projection)
+            assert projection is not None
+            self.assertEqual(int(projection['dirty']), 1)
+
     def test_web_run_does_not_enqueue_feishu_outbox(self) -> None:
         with tempfile.TemporaryDirectory() as raw_dir:
             root = Path(raw_dir)

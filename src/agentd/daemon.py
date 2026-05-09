@@ -87,6 +87,9 @@ class AgentDaemon:
         self._ensure_scheduler()
         self._ensure_web_gateway()
         self._recover_stale_runs()
+        self._mark_changed_status_cards_dirty()
+        self._reconcile_dirty_cards()
+        self._drain_feishu_outbox()
         self._send_startup_notice_if_needed()
         listener = FeishuListener(self.config.feishu)
         self.log.info('starting Feishu listener')
@@ -943,6 +946,23 @@ class AgentDaemon:
             )
             self.registry.mark_card_enqueued(run.id, render_hash=render_hash)
 
+    def _mark_changed_status_cards_dirty(self, *, limit: int = 40) -> None:
+        for run in self.registry.list_runs(limit=limit):
+            if is_web_run(run):
+                continue
+            projection = self.registry.get_card_projection(run.id)
+            remote_message_id = run.status_message_id
+            if projection is not None and not remote_message_id:
+                remote_message_id = str(projection['remote_message_id'] or '')
+            if not remote_message_id:
+                continue
+            view = self._load_run_view(run.id)
+            if view is None:
+                continue
+            render_hash = self._card_render_hash(self._build_status_card(view))
+            if projection is None or str(projection['last_render_hash'] or '') != render_hash:
+                self.registry.mark_card_dirty(run.id)
+
     @staticmethod
     def _card_render_hash(card: dict[str, Any]) -> str:
         raw = json.dumps(card, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode('utf-8')
@@ -1131,13 +1151,17 @@ class AgentDaemon:
                 'title': {'tag': 'plain_text', 'content': title},
             },
             'elements': [
-                {'tag': 'div', 'text': {'tag': 'lark_md', 'content': self._run_line(active, elapsed)}},
+                {'tag': 'div', 'text': {'tag': 'lark_md', 'content': self._status_line(active, elapsed)}},
                 *self._error_elements(active),
                 {'tag': 'hr'},
                 *self._view_elements(active),
                 {'tag': 'action', 'actions': self._card_actions(active)},
             ],
         }
+
+    def _status_line(self, active: RunView, elapsed: int) -> str:
+        status = escape_lark_md(active.run.status)
+        return f'**状态**：{self._phase_label(active.run.status_phase)} · {status}\n{self._run_line(active, elapsed)}'
 
     def _run_line(self, active: RunView, elapsed: int) -> str:
         return f'{session_label(active.session)} · {active.run.host} · {active.session.cwd} · {format_elapsed(elapsed)}'
