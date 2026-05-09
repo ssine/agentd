@@ -561,6 +561,15 @@ function compact(value, limit = 1200) {
   return text.length > limit ? text.slice(0, limit - 6) + ' ...(截断)' : text;
 }
 
+function compactNumber(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return String(value ?? '');
+  if (Math.abs(number) <= 10000) return String(number);
+  const scaled = number / 1000;
+  const text = scaled >= 100 ? scaled.toFixed(0) : scaled.toFixed(1);
+  return `${text.replace(/\.0$/, '')}k`;
+}
+
 async function loadState() {
   const url = selectedRunId ? `/api/state?run_id=${encodeURIComponent(selectedRunId)}` : '/api/state';
   const response = await fetch(url, {cache: 'no-store'});
@@ -893,8 +902,8 @@ function renderJsonMember(label, value, nodeKey, depth) {
 
 function renderCollapsedJsonValue(value, nodeKey, depth) {
   const open = openJsonNodeKeys.has(nodeKey) && !openJsonNodeKeys.has(`${nodeKey}:closed`);
-  return `<details class="json-node" data-json-node-key="${esc(nodeKey)}" ${open ? 'open' : ''}>
-    <summary>${renderJsonNodeSummary('...', describeJsonValue(value), nodeKey)}</summary>
+  return `<details class="json-node json-collapsed-value" data-json-node-key="${esc(nodeKey)}" ${open ? 'open' : ''}>
+    <summary><span class="json-punctuation">...</span></summary>
     <div class="json-children">
       ${renderJsonValue(value, `${nodeKey}.$value`, depth + 1)}
     </div>
@@ -904,10 +913,10 @@ function renderCollapsedJsonValue(value, nodeKey, depth) {
 function renderJsonNodeSummary(shape, count, nodeKey) {
   return `<span class="json-summary">
     <span><span class="json-punctuation">${esc(shape)}</span> <span class="json-punctuation">${esc(count)}</span></span>
-    <span class="json-actions">
+    ${isJsonActionHidden(nodeKey) ? '' : `<span class="json-actions">
       <button class="json-action" type="button" data-json-action="expand" data-json-node-key="${esc(nodeKey)}">递归展开</button>
       <button class="json-action" type="button" data-json-action="collapse" data-json-node-key="${esc(nodeKey)}">递归折叠</button>
-    </span>
+    </span>`}
   </span>`;
 }
 
@@ -953,12 +962,8 @@ function isCollapsedResponseField(nodeKey) {
   return RESPONSE_COLLAPSED_FIELDS.has(path);
 }
 
-function describeJsonValue(value) {
-  if (Array.isArray(value)) return `${value.length} items`;
-  if (value && typeof value === 'object') return `${Object.keys(value).length} keys`;
-  if (typeof value === 'string') return value.includes('\n') ? `${value.split('\n').length} lines` : `${value.length} chars`;
-  if (value === null) return 'null';
-  return String(value);
+function isJsonActionHidden(nodeKey) {
+  return nodeKey.includes(':response:$.') && nodeKey.includes('.$value');
 }
 
 function jsonObjectMeta(value) {
@@ -1035,9 +1040,9 @@ function requestMeta(request) {
   const parts = [];
   if (request.model) parts.push(`model ${esc(request.model)}`);
   if (request.status_code) parts.push(`HTTP ${esc(request.status_code)}`);
-  if (request.input_tokens != null) parts.push(`in ${esc(request.input_tokens)}`);
-  if (request.output_tokens != null) parts.push(`out ${esc(request.output_tokens)}`);
-  if (request.total_tokens != null) parts.push(`total ${esc(request.total_tokens)}`);
+  if (request.input_tokens != null) parts.push(`in ${esc(compactNumber(request.input_tokens))}`);
+  if (request.output_tokens != null) parts.push(`out ${esc(compactNumber(request.output_tokens))}`);
+  if (request.total_tokens != null) parts.push(`total ${esc(compactNumber(request.total_tokens))}`);
   if (request.storage_state) parts.push(esc(request.storage_state));
   parts.push(`#${esc(request.id || '')}`);
   return `<div class="request-meta">${parts.map(item => `<span>${item}</span>`).join('')}</div>`;
