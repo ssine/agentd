@@ -75,7 +75,7 @@ class CodexConfig:
     model_provider: str = ''
     sandbox: str = 'danger-full-access'
     approval_policy: str = 'never'
-    turn_timeout_seconds: int = 1800
+    turn_timeout_seconds: int | None = None
     startup_timeout_seconds: int = 60
     capture: CodexCaptureConfig = field(default_factory=CodexCaptureConfig)
     otel: CodexOtelConfig = field(default_factory=CodexOtelConfig)
@@ -87,7 +87,7 @@ class ClaudeCodeConfig:
     model: str = 'sonnet'
     permission_mode: str = 'bypassPermissions'
     use_login_shell: bool = True
-    turn_timeout_seconds: int = 1800
+    turn_timeout_seconds: int | None = None
     extra_args: tuple[str, ...] = ()
 
 
@@ -183,6 +183,17 @@ def _zstd_level(value: Any) -> int:
     if level < 1 or level > 22:
         raise ValueError('codex.capture.zstd_level must be between 1 and 22')
     return level
+
+
+def _optional_timeout_seconds(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, str) and not value.strip():
+        return None
+    timeout = int(value)
+    if timeout <= 0:
+        return None
+    return timeout
 
 
 def _otel_protocol(value: Any) -> str:
@@ -322,7 +333,7 @@ def load_config(path: str | Path | None = None) -> AgentdConfig:
         model_provider=str(codex_raw.get('model_provider') or ''),
         sandbox=str(codex_raw.get('sandbox') or 'danger-full-access'),
         approval_policy=str(codex_raw.get('approval_policy') or 'never'),
-        turn_timeout_seconds=int(codex_raw.get('turn_timeout_seconds') or 1800),
+        turn_timeout_seconds=_optional_timeout_seconds(codex_raw.get('turn_timeout_seconds')),
         startup_timeout_seconds=int(codex_raw.get('startup_timeout_seconds') or 60),
         capture=CodexCaptureConfig(
             enabled=bool(codex_capture_raw.get('enabled', False)),
@@ -350,12 +361,17 @@ def load_config(path: str | Path | None = None) -> AgentdConfig:
             zstd_level=_zstd_level(codex_otel_raw.get('zstd_level') or capture_zstd_level),
         ),
     )
+    claude_turn_timeout = (
+        _optional_timeout_seconds(claude_raw.get('turn_timeout_seconds'))
+        if 'turn_timeout_seconds' in claude_raw
+        else codex.turn_timeout_seconds
+    )
     claude = ClaudeCodeConfig(
         command=_command(claude_raw.get('command') or 'aclaude', source_dir),
         model=str(claude_raw.get('model') or 'sonnet'),
         permission_mode=str(claude_raw.get('permission_mode') or 'bypassPermissions'),
         use_login_shell=bool(claude_raw.get('use_login_shell', True)),
-        turn_timeout_seconds=int(claude_raw.get('turn_timeout_seconds') or codex.turn_timeout_seconds),
+        turn_timeout_seconds=claude_turn_timeout,
         extra_args=_string_tuple(claude_raw.get('extra_args')),
     )
     runner = RunnerConfig(kind=_runner_kind(runner_raw.get('kind') or agentd_raw.get('runner') or 'codex'))

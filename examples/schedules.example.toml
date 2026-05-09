@@ -7,6 +7,9 @@ enabled = false
 chat_id = ""
 prompt = ""
 title = "Example"
+# "schedule" keeps a separate scheduled-task session.
+# "main" posts into the chat's main session and queues until it is idle.
+session = "schedule"
 profile = "default"
 skills = []
 
@@ -14,4 +17,3 @@ skills = []
 kind = "daily"
 timezone = "Asia/Shanghai"
 time = "09:00"
-

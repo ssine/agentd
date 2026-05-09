@@ -288,7 +288,7 @@ Context is intentionally thin and user-controlled:
 - `skills/**/SKILL.md`: context-local skills scanned by name from YAML frontmatter.
 - `skills = ["*"]`: profile shorthand that injects every discovered skill.
 - `memory/**`: deeper Markdown memory searched with `rg` by the agent when prior work, preferences, decisions, dates, people, or todos are relevant.
-- `schedules.toml`: lightweight scheduled jobs.
+- `schedules.toml`: lightweight scheduled jobs. A job can use `session = "schedule"` for an independent scheduled-task session, or `session = "main"` to post into the chat's main session and queue until that session is idle.
 
 Agentd also injects its built-in `agentd-ops` skill into every managed Codex run.
 

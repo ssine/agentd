@@ -352,11 +352,18 @@ class AgentDaemon:
         )
 
     def _maybe_start_scheduled_job(self, job: ScheduleJob, now: datetime | None = None) -> None:
-        run_key = due_run_key(job, now)
-        if not run_key:
+        if not job.enabled:
             return
         if not job.chat_id or not job.prompt:
             self.log.warning('scheduled job %s is missing chat_id or prompt', job.id)
+            return
+        if job.session == 'main':
+            self._maybe_enqueue_main_scheduled_job(job, now=now)
+            self._maybe_start_pending_main_scheduled_job(job)
+            return
+
+        run_key = due_run_key(job, now)
+        if not run_key:
             return
         context_profile = job.context_profile or self.config.context.default_profile
         session = self.registry.get_schedule_session(
@@ -375,6 +382,38 @@ class AgentDaemon:
         if not self.registry.claim_schedule_run(job.id, run_key):
             return
         self._start_scheduled_job(job, run_key, session)
+
+    def _maybe_enqueue_main_scheduled_job(self, job: ScheduleJob, *, now: datetime | None = None) -> None:
+        run_key = due_run_key(job, now)
+        if not run_key:
+            return
+        if not self.registry.claim_schedule_run(job.id, run_key):
+            return
+        if self.registry.enqueue_pending_schedule_run(job.id, run_key):
+            self.log.info('queued scheduled job %s run %s for main session', job.id, run_key)
+
+    def _maybe_start_pending_main_scheduled_job(self, job: ScheduleJob) -> None:
+        run_key = self.registry.get_pending_schedule_run(job.id)
+        if not run_key:
+            return
+        session = self.registry.get_main_session(
+            job.chat_id,
+            str(self.config.workspace),
+            channel='feishu',
+            conversation_ref=job.chat_id,
+        )
+        if self._active_for(session.id) is not None:
+            self.log.info('scheduled job %s is pending but main session %s is already active', job.id, session.id)
+            return
+        if self.registry.get_active_run_for_session(session.id) is not None:
+            self.log.info(
+                'scheduled job %s is pending but main session %s has a persisted active run',
+                job.id,
+                session.id,
+            )
+            return
+        self._start_scheduled_job(job, run_key, session)
+        self.registry.finish_pending_schedule_run(job.id, run_key)
 
     def _start_scheduled_job(self, job: ScheduleJob, run_key: str, session: AgentSession) -> None:
         run = self.registry.create_run(

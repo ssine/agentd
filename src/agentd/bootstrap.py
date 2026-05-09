@@ -130,7 +130,6 @@ model = ""
 model_provider = ""
 sandbox = "danger-full-access"
 approval_policy = "never"
-turn_timeout_seconds = 1800
 startup_timeout_seconds = 60
 
 [claude]
@@ -138,7 +137,6 @@ command = "{options.claude_command}"
 model = "{options.claude_model}"
 permission_mode = "bypassPermissions"
 use_login_shell = true
-turn_timeout_seconds = 1800
 """
 
 
@@ -169,6 +167,9 @@ enabled = false
 chat_id = ""
 prompt = ""
 title = "Example"
+# "schedule" keeps a separate scheduled-task session.
+# "main" posts into the chat's main session and queues until it is idle.
+session = "schedule"
 profile = "default"
 skills = []
 

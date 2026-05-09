@@ -361,7 +361,11 @@ class CodexAppServer:
         event_sink: CodexEventSink | None = None,
         control: CodexRunControl | None = None,
     ) -> tuple[str, str]:
-        deadline = time.time() + self.config.turn_timeout_seconds
+        deadline = (
+            time.time() + self.config.turn_timeout_seconds
+            if self.config.turn_timeout_seconds is not None
+            else None
+        )
         item_phases: dict[str, str | None] = {}
         final_chunks: list[str] = []
         final_text_from_completed = ''
@@ -370,7 +374,9 @@ class CodexAppServer:
         terminal_status_at: float | None = None
         last_error = ''
 
-        while time.time() < deadline:
+        while True:
+            if deadline is not None and time.time() >= deadline:
+                raise CodexAppServerError(f'timed out waiting for Codex turn {turn_id}')
             if final_answer_completed_at and time.time() - final_answer_completed_at > 2:
                 final_text = ''.join(final_chunks).strip() or final_text_from_completed.strip()
                 self._emit(
@@ -530,8 +536,6 @@ class CodexAppServer:
                     text = last_error
                 self._emit(event_sink, 'turn_completed', status=status, turn_id=turn_id, final_text=text)
                 return text, status
-
-        raise CodexAppServerError(f'timed out waiting for Codex turn {turn_id}')
 
     def _request(
         self,

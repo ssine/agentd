@@ -255,6 +255,8 @@ class ConfigTest(unittest.TestCase):
             config = load_config(config_path)
 
             self.assertEqual(config.codex.command, 'codex')
+            self.assertIsNone(config.codex.turn_timeout_seconds)
+            self.assertIsNone(config.claude.turn_timeout_seconds)
             self.assertFalse(config.web.enabled)
             self.assertEqual(config.web.host, '0.0.0.0')
             self.assertEqual(config.web.port, 9999)
@@ -321,6 +323,36 @@ class ConfigTest(unittest.TestCase):
             self.assertTrue(config.claude.use_login_shell)
             self.assertEqual(config.claude.turn_timeout_seconds, 120)
             self.assertEqual(config.claude.extra_args, ('--max-budget-usd', '1'))
+
+    def test_codex_turn_timeout_is_only_set_when_configured(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_dir:
+            root = Path(raw_dir)
+            home = root / '.agentd'
+            source_dir = root / 'agentd-src'
+            workspace = root / 'workspace'
+            home.mkdir()
+            source_dir.mkdir()
+            workspace.mkdir()
+            config_path = home / 'agentd.toml'
+            config_path.write_text(
+                '\n'.join(
+                    [
+                        '[agentd]',
+                        f'source_dir = "{source_dir}"',
+                        f'workspace = "{workspace}"',
+                        '',
+                        '[codex]',
+                        'turn_timeout_seconds = 120',
+                        '',
+                    ]
+                ),
+                encoding='utf-8',
+            )
+
+            config = load_config(config_path)
+
+            self.assertEqual(config.codex.turn_timeout_seconds, 120)
+            self.assertEqual(config.claude.turn_timeout_seconds, 120)
 
 
 if __name__ == '__main__':

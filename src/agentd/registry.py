@@ -105,6 +105,19 @@ class Registry:
                     updated_at integer not null
                 );
 
+                create table if not exists schedule_pending_runs (
+                    id integer primary key autoincrement,
+                    job_id text not null,
+                    run_key text not null,
+                    state text not null default 'pending',
+                    created_at integer not null,
+                    updated_at integer not null,
+                    unique(job_id, run_key)
+                );
+
+                create index if not exists schedule_pending_runs_state_idx
+                on schedule_pending_runs(state, created_at);
+
                 create table if not exists runs (
                     id integer primary key autoincrement,
                     session_id integer not null,
@@ -1309,6 +1322,42 @@ class Registry:
                 (job_id, run_key, now),
             )
             return True
+
+    def enqueue_pending_schedule_run(self, job_id: str, run_key: str) -> bool:
+        now = int(time.time())
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                insert or ignore into schedule_pending_runs(job_id, run_key, state, created_at, updated_at)
+                values(?, ?, 'pending', ?, ?)
+                """,
+                (job_id, run_key, now, now),
+            )
+            return cursor.rowcount > 0
+
+    def get_pending_schedule_run(self, job_id: str) -> str:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                select run_key from schedule_pending_runs
+                where job_id = ? and state = 'pending'
+                order by id
+                limit 1
+                """,
+                (job_id,),
+            ).fetchone()
+        return str(row['run_key']) if row else ''
+
+    def finish_pending_schedule_run(self, job_id: str, run_key: str, *, state: str = 'started') -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                update schedule_pending_runs
+                set state = ?, updated_at = ?
+                where job_id = ? and run_key = ? and state = 'pending'
+                """,
+                (state, int(time.time()), job_id, run_key),
+            )
 
     def _ensure_channel_binding_for_row(
         self,

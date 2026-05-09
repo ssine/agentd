@@ -19,6 +19,7 @@ class ScheduleJob:
     id: str
     name: str
     enabled: bool
+    session: str
     chat_id: str
     prompt: str
     title: str
@@ -49,11 +50,13 @@ def load_schedule_config(path: Path) -> ScheduleConfig:
             continue
         schedule_raw = value.get('schedule') if isinstance(value.get('schedule'), dict) else {}
         kind = str(schedule_raw.get('kind') or value.get('kind') or 'daily')
+        session = _normalize_session(value.get('session') or value.get('target_session') or 'schedule')
         jobs.append(
             ScheduleJob(
                 id=job_id,
                 name=str(value.get('name') or job_id),
                 enabled=bool(value.get('enabled', True)),
+                session=session,
                 chat_id=str(value.get('chat_id') or ''),
                 prompt=str(value.get('prompt') or value.get('message') or ''),
                 title=str(value.get('title') or value.get('name') or job_id),
@@ -67,6 +70,13 @@ def load_schedule_config(path: Path) -> ScheduleConfig:
             )
         )
     return ScheduleConfig(path=path, jobs=tuple(jobs))
+
+
+def _normalize_session(value: object) -> str:
+    session = str(value or '').strip().lower()
+    if session in {'main', 'primary'}:
+        return 'main'
+    return 'schedule'
 
 
 def due_run_key(job: ScheduleJob, now: datetime | None = None) -> str:

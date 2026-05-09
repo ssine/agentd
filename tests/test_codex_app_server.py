@@ -83,6 +83,7 @@ class RecordingCodexAppServer(CodexAppServer):
                 model='',
                 model_provider=model_provider,
                 startup_timeout_seconds=1,
+                turn_timeout_seconds=None,
             ),
             SimpleNamespace(mkdir=lambda **_: None),
         )
