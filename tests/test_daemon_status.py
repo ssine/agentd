@@ -10,6 +10,16 @@ from agentd.models import AgentSession, RunRecord, SpawnRequest
 class FakeFeishu:
     def __init__(self) -> None:
         self.interactive_replies: list[dict[str, object]] = []
+        self.interactive_sends: list[dict[str, object]] = []
+
+    def send_interactive(self, chat_id: str, card: dict[str, object]) -> dict[str, object]:
+        self.interactive_sends.append(
+            {
+                'chat_id': chat_id,
+                'card': card,
+            }
+        )
+        return {'data': {'message_id': 'message-branch'}}
 
     def reply_interactive(
         self,
@@ -155,6 +165,74 @@ class DaemonStatusCardTest(unittest.TestCase):
         self.assertEqual(card['header']['template'], 'blue')
         content = card['elements'][0]['text']['content']
         self.assertIn('<at id=ou_sender></at>', content)
+
+    def test_branch_thread_starts_from_top_level_chat_card(self) -> None:
+        daemon = object.__new__(AgentDaemon)
+        daemon.dry_send = False
+        fake_feishu = FakeFeishu()
+        daemon.feishu = fake_feishu
+
+        parent = RunRecord(
+            id=1,
+            session_id=1,
+            source_message_id='message-parent',
+            prompt='delegate',
+            state='running',
+            status_phase='running',
+            status='运行中',
+            status_message_id='status-parent',
+            codex_thread_id='thread-parent',
+            turn_id='turn-parent',
+            subject='Codex',
+            display_title='Parent',
+            host='host',
+            status_reply_in_thread=False,
+            context_profile='default',
+            skills=(),
+            hide_early_iterations=True,
+            show_tool_details=False,
+            truncate_content=True,
+            final_message_text='',
+            final_message_sent_at=None,
+            error='',
+            handoff_child_session_id=None,
+            started_at=100,
+            finished_at=None,
+            heartbeat_at=100,
+            lease_until=130,
+            created_at=100,
+            updated_at=100,
+            sender_open_id='ou_parent',
+        )
+        request = SpawnRequest(
+            id=3,
+            parent_session_id=1,
+            parent_status_message_id='status-parent',
+            parent_source_message_id='message-parent',
+            chat_id='chat',
+            cwd='/workspace',
+            title='Branch',
+            prompt='do branch work',
+            context_profile='default',
+            skills=(),
+            state='claimed',
+            sender_open_id='ou_sender',
+            mode='branch',
+        )
+
+        thread_id, message_id = daemon._create_child_thread(parent, request, mode='branch')
+
+        self.assertEqual(thread_id, 'message-branch')
+        self.assertEqual(message_id, 'message-branch')
+        self.assertEqual(fake_feishu.interactive_replies, [])
+        self.assertEqual(fake_feishu.interactive_sends[0]['chat_id'], 'chat')
+        card = fake_feishu.interactive_sends[0]['card']
+        self.assertIsInstance(card, dict)
+        assert isinstance(card, dict)
+        self.assertEqual(card['header']['template'], 'blue')
+        content = card['elements'][0]['text']['content']
+        self.assertIn('<at id=ou_sender></at>', content)
+        self.assertIn('并行子任务已启动', content)
 
 
 if __name__ == '__main__':

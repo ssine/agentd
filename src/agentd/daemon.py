@@ -408,11 +408,15 @@ class AgentDaemon:
         if self.dry_send:
             return f'dry-thread-{request.id}', f'dry-thread-message-{request.id}'
         sender_open_id = request.sender_open_id or parent.sender_open_id
-        result = self.feishu.reply_interactive(
-            parent.status_message_id,
-            self._build_child_intro_card(request, sender_open_id=sender_open_id, mode=mode),
-            reply_in_thread=True,
-        )
+        card = self._build_child_intro_card(request, sender_open_id=sender_open_id, mode=mode)
+        if mode == 'handoff':
+            result = self.feishu.reply_interactive(
+                parent.status_message_id,
+                card,
+                reply_in_thread=True,
+            )
+        else:
+            result = self.feishu.send_interactive(request.chat_id, card)
         thread_id = thread_id_from_result(result)
         message_id = message_id_from_result(result)
         if not thread_id:
