@@ -304,6 +304,7 @@ class AgentDaemon:
             self.registry.finish_spawn_request(request.id, state='failed', error='parent run has no status card')
             return
 
+        sender_open_id = request.sender_open_id or parent_run.sender_open_id
         try:
             thread_id, source_message_id = self._create_child_thread(parent_run, request)
             child_session = self.registry.bind_child_session(
@@ -333,6 +334,7 @@ class AgentDaemon:
                 display_title=normalize_title(request.title or title_from_text(request.prompt, fallback='子任务')),
                 context_profile=request.context_profile or self.config.context.default_child_profile,
                 skills=request.skills,
+                sender_open_id=sender_open_id,
             )
             child = ActiveRun(run_id=child_run.id, session=child_session, control=CodexRunControl())
             with self._active_lock:
@@ -377,7 +379,11 @@ class AgentDaemon:
                 '可以在这个话题里继续追加指令或打断。',
             ]
         )
-        result = self.feishu.reply_markdown(parent.status_message_id, text, reply_in_thread=True)
+        sender_open_id = request.sender_open_id or parent.sender_open_id
+        at_open_ids = [sender_open_id] if sender_open_id else None
+        result = self.feishu.reply_markdown(
+            parent.status_message_id, text, at_open_ids=at_open_ids, reply_in_thread=True
+        )
         thread_id = thread_id_from_result(result)
         message_id = message_id_from_result(result)
         if not thread_id:
@@ -424,6 +430,7 @@ class AgentDaemon:
             status_reply_in_thread=session.kind == 'child' and not reuse_root_card,
             context_profile=context_profile,
             skills=context_skills,
+            sender_open_id=message.sender_open_id,
         )
         active = ActiveRun(run_id=run.id, session=session, control=CodexRunControl())
         with self._active_lock:
@@ -1418,6 +1425,7 @@ class AgentDaemon:
         status_message_id = run.status_message_id if run else ''
         context_profile = run.context_profile if run else ''
         context_skills = run.skills if run else ()
+        sender_open_id = run.sender_open_id if run else ''
         return {
             'AGENTD_CLI': str(self.config.executable),
             'AGENTD_CONFIG': str(self.config.config_path),
@@ -1425,6 +1433,7 @@ class AgentDaemon:
             'AGENTD_CHAT_ID': active.session.chat_id,
             'AGENTD_SOURCE_MESSAGE_ID': source_message_id,
             'AGENTD_STATUS_MESSAGE_ID': status_message_id,
+            'AGENTD_SENDER_OPEN_ID': sender_open_id,
             'AGENTD_SESSION_KIND': active.session.kind,
             'AGENTD_CWD': active.session.cwd,
             'AGENTD_CONTEXT_PROFILE': context_profile,

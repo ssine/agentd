@@ -68,6 +68,7 @@ class RunRecord:
     lease_until: int
     created_at: int
     updated_at: int
+    sender_open_id: str = ''
 
 
 @dataclass(frozen=True)
@@ -115,6 +116,7 @@ class SpawnRequest:
     context_profile: str
     skills: tuple[str, ...]
     state: str
+    sender_open_id: str = ''
 
 
 @dataclass(frozen=True)

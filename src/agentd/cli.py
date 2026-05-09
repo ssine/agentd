@@ -60,6 +60,7 @@ def main(argv: list[str] | None = None) -> int:
     spawn_child.add_argument('--parent-session-id', type=int, default=0)
     spawn_child.add_argument('--parent-status-message-id', default='')
     spawn_child.add_argument('--parent-source-message-id', default='')
+    spawn_child.add_argument('--sender-open-id', default='')
     spawn_child.add_argument('--chat-id', default='')
 
     set_title = sub.add_parser('set-title', help='update the active Feishu status card title')
@@ -262,6 +263,7 @@ def spawn_child_request(config: AgentdConfig, args: argparse.Namespace) -> int:
     parent_session_id = args.parent_session_id or int(os.environ.get('AGENTD_SESSION_ID') or 0)
     parent_status_message_id = args.parent_status_message_id or os.environ.get('AGENTD_STATUS_MESSAGE_ID') or ''
     parent_source_message_id = args.parent_source_message_id or os.environ.get('AGENTD_SOURCE_MESSAGE_ID') or ''
+    sender_open_id = args.sender_open_id or os.environ.get('AGENTD_SENDER_OPEN_ID') or ''
     chat_id = args.chat_id or os.environ.get('AGENTD_CHAT_ID') or ''
     if not parent_session_id or not parent_status_message_id or not chat_id:
         print(
@@ -295,6 +297,7 @@ def spawn_child_request(config: AgentdConfig, args: argparse.Namespace) -> int:
         prompt=prompt,
         context_profile=str(args.profile or ''),
         skills=skills,
+        sender_open_id=sender_open_id,
     )
     print(f'spawn_request_id={request_id}')
     return 0
