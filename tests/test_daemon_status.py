@@ -9,22 +9,20 @@ from agentd.models import AgentSession, RunRecord, SpawnRequest
 
 class FakeFeishu:
     def __init__(self) -> None:
-        self.markdown_replies: list[dict[str, object]] = []
+        self.interactive_replies: list[dict[str, object]] = []
 
-    def reply_markdown(
+    def reply_interactive(
         self,
         message_id: str,
-        markdown: str,
+        card: dict[str, object],
         *,
         reply_in_thread: bool = False,
-        at_open_ids: list[str] | None = None,
     ) -> dict[str, object]:
-        self.markdown_replies.append(
+        self.interactive_replies.append(
             {
                 'message_id': message_id,
-                'markdown': markdown,
+                'card': card,
                 'reply_in_thread': reply_in_thread,
-                'at_open_ids': at_open_ids,
             }
         )
         return {'data': {'thread_id': 'thread-child', 'message_id': 'message-child'}}
@@ -148,9 +146,15 @@ class DaemonStatusCardTest(unittest.TestCase):
 
         self.assertEqual(thread_id, 'thread-child')
         self.assertEqual(message_id, 'message-child')
-        self.assertEqual(fake_feishu.markdown_replies[0]['message_id'], 'status-parent')
-        self.assertEqual(fake_feishu.markdown_replies[0]['reply_in_thread'], True)
-        self.assertEqual(fake_feishu.markdown_replies[0]['at_open_ids'], ['ou_sender'])
+        self.assertEqual(fake_feishu.interactive_replies[0]['message_id'], 'status-parent')
+        self.assertEqual(fake_feishu.interactive_replies[0]['reply_in_thread'], True)
+        card = fake_feishu.interactive_replies[0]['card']
+        self.assertIsInstance(card, dict)
+        assert isinstance(card, dict)
+        self.assertNotEqual(card.get('schema'), '2.0')
+        self.assertEqual(card['header']['template'], 'blue')
+        content = card['elements'][0]['text']['content']
+        self.assertIn('<at id=ou_sender></at>', content)
 
 
 if __name__ == '__main__':

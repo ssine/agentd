@@ -311,13 +311,22 @@ class AgentDaemon:
                 request.chat_id,
                 thread_id,
                 request.cwd,
-                root_message_id=parent_run.status_message_id,
+                root_message_id=source_message_id,
                 parent_id=parent.session.id,
                 context_profile=request.context_profile or self.config.context.default_child_profile,
                 skills=request.skills,
             )
             parent.handoff_child_session_id = child_session.id
-            self.registry.update_run(parent.run_id, handoff_child_session_id=child_session.id)
+            self.registry.update_run_and_mark_card_dirty(
+                parent.run_id,
+                handoff_child_session_id=child_session.id,
+                state='interrupted',
+                status='已移交子任务',
+                status_phase='stopped',
+                finished_at=int(time.time()),
+            )
+            self._add_model_message(parent, f'已移交子任务：{request.title or request.cwd}', phase='control')
+            self._publish_status(parent, force=True, create=True)
             parent.control.interrupt()
             parent.done.set()
             with self._active_lock:
@@ -325,11 +334,11 @@ class AgentDaemon:
 
             child_run = self.registry.create_run(
                 session_id=child_session.id,
-                source_message_id=parent_run.status_message_id,
+                source_message_id=source_message_id,
                 prompt=self._build_child_prompt(request, child_session, source_message_id),
                 host=self.host,
                 status='启动子任务',
-                status_message_id=parent_run.status_message_id,
+                status_message_id=source_message_id,
                 subject='子任务',
                 display_title=normalize_title(request.title or title_from_text(request.prompt, fallback='子任务')),
                 context_profile=request.context_profile or self.config.context.default_child_profile,
@@ -371,24 +380,39 @@ class AgentDaemon:
     def _create_child_thread(self, parent: RunRecord, request: SpawnRequest) -> tuple[str, str]:
         if self.dry_send:
             return f'dry-thread-{request.id}', f'dry-thread-message-{request.id}'
-        text = '\n'.join(
-            [
-                f'**子任务已启动**：{request.title or request.cwd}',
-                f'CWD: `{request.cwd}`',
-                '',
-                '可以在这个话题里继续追加指令或打断。',
-            ]
-        )
         sender_open_id = request.sender_open_id or parent.sender_open_id
-        at_open_ids = [sender_open_id] if sender_open_id else None
-        result = self.feishu.reply_markdown(
-            parent.status_message_id, text, at_open_ids=at_open_ids, reply_in_thread=True
+        result = self.feishu.reply_interactive(
+            parent.status_message_id,
+            self._build_child_intro_card(request, sender_open_id=sender_open_id),
+            reply_in_thread=True,
         )
         thread_id = thread_id_from_result(result)
         message_id = message_id_from_result(result)
         if not thread_id:
             thread_id = message_id or parent.status_message_id
         return thread_id, message_id or parent.status_message_id
+
+    def _build_child_intro_card(self, request: SpawnRequest, *, sender_open_id: str = '') -> dict[str, Any]:
+        title = normalize_title(request.title or request.cwd, fallback='子任务')
+        mention = f'<at id={sender_open_id}></at> ' if sender_open_id else ''
+        content = '\n'.join(
+            [
+                f'{mention}**子任务已启动**：{escape_lark_md(request.title or request.cwd)}',
+                f'CWD: `{escape_lark_md(request.cwd)}`',
+                '',
+                '可以在这个话题里继续追加指令或打断。',
+            ]
+        )
+        return {
+            'config': {'wide_screen_mode': True, 'update_multi': True},
+            'header': {
+                'template': 'blue',
+                'title': {'tag': 'plain_text', 'content': f'🧵 {title}'},
+            },
+            'elements': [
+                {'tag': 'div', 'text': {'tag': 'lark_md', 'content': content}},
+            ],
+        }
 
     def handle_message(self, message: IncomingMessage) -> str:
         self._ensure_spawn_watcher()

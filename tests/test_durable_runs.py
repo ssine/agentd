@@ -13,6 +13,7 @@ from agentd.codex_app_server import CodexRunControl
 from agentd.config import AgentdConfig, CodexConfig, FeishuConfig, WebConfig
 from agentd.context import ContextConfig, ContextProfile
 from agentd.daemon import ActiveRun, AgentDaemon
+from agentd.models import SpawnRequest
 from agentd.registry import Registry
 from agentd.schedule import ScheduleConfig
 from agentd.service import read_startup_notice, write_startup_notice
@@ -268,6 +269,62 @@ class DurableRunProjectionTest(unittest.TestCase):
             self.assertIsNotNone(updated)
             assert updated is not None
             self.assertEqual(updated.final_message_text, 'done')
+
+    def test_spawned_child_uses_thread_intro_message_as_status_card(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_dir:
+            root = Path(raw_dir)
+            daemon = AgentDaemon(make_config(root), dry_send=True)
+            parent_session = daemon.registry.get_main_session('chat-1', str(root))
+            parent_run = daemon.registry.create_run(
+                session_id=parent_session.id,
+                source_message_id='user-message',
+                prompt='delegate',
+                host='host-a',
+                subject='Codex',
+                display_title='Parent run',
+                status_message_id='parent-card',
+            )
+            parent_active = ActiveRun(run_id=parent_run.id, session=parent_session, control=CodexRunControl())
+            with daemon._active_lock:
+                daemon._active_runs[parent_session.id] = parent_active
+            request = SpawnRequest(
+                id=1,
+                parent_session_id=parent_session.id,
+                parent_status_message_id='parent-card',
+                parent_source_message_id='user-message',
+                chat_id='chat-1',
+                cwd=str(root),
+                title='Child run',
+                prompt='do the child work',
+                context_profile='',
+                skills=(),
+                state='claimed',
+                sender_open_id='ou_user',
+            )
+
+            with (
+                patch.object(daemon, '_status_ticker', return_value=None),
+                patch.object(daemon, '_run_turn_worker', return_value=None),
+                redirect_stdout(StringIO()),
+            ):
+                daemon._handle_spawn_request(request)
+
+            parent_after = daemon.registry.get_run(parent_run.id)
+            self.assertIsNotNone(parent_after)
+            assert parent_after is not None
+            self.assertEqual(parent_after.state, 'interrupted')
+            self.assertEqual(parent_after.status_phase, 'stopped')
+            self.assertEqual(parent_after.status, '已移交子任务')
+
+            child_sessions = [session for session in daemon.registry.list_sessions() if session.kind == 'child']
+            self.assertEqual(len(child_sessions), 1)
+            child_session = child_sessions[0]
+            self.assertEqual(child_session.root_message_id, 'dry-thread-message-1')
+            child_runs = daemon.registry.list_runs(session_id=child_session.id)
+            self.assertEqual(len(child_runs), 1)
+            child_run = child_runs[0]
+            self.assertEqual(child_run.source_message_id, 'dry-thread-message-1')
+            self.assertEqual(child_run.status_message_id, 'dry-thread-message-1')
 
     def test_feishu_outbox_send_slot_is_throttled(self) -> None:
         with tempfile.TemporaryDirectory() as raw_dir:

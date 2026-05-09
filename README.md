@@ -88,7 +88,11 @@ Goals:
 - Run `uv run agentd --config ~/.agentd/agentd.toml init` to create ~/.agentd/agentd.toml and ~/agent-context if they do not exist.
 - Initialize context.toml, schedules.toml, CONTEXT.md, memory/MEMORY.md, memory/projects/, and skills/ through that command.
 - Ask me for my Feishu self-built app App ID and App Secret; explain that agentd needs app credentials, not a tenant_access_token or webhook secret.
-- Tell me to create the Feishu app at https://open.feishu.cn/app if needed.
+- If Feishu credentials are missing, pause setup and tell me exactly where to create or find them:
+  - Create a Feishu "智能体应用" / self-built app at https://open.feishu.cn/app if I do not have one.
+  - In that app's "Credentials & Basic Info" page, copy App ID (`cli_xxx`) and App Secret.
+  - Paste them back into this chat as `AGENTD_FEISHU_APP_ID=cli_xxx` and `AGENTD_FEISHU_APP_SECRET=...`.
+  - After I paste them back, continue setup by writing them to ~/.agentd/agentd.toml or exporting them for this shell, then rerun config-check.
 - Tell me to open https://open.feishu.cn/app/{app_id}/event?tab=callback after replacing `{app_id}` with my app ID, then add the `card.action.trigger` / "卡片回传交互" callback subscription.
 - Confirm the Feishu app has Bot capability, long-connection events `im.message.receive_v1` and `card.action.trigger`, and the permissions documented in README.
 - Keep secrets out of Git by default; use environment variables or tell me exactly where to edit app_id/app_secret.
@@ -183,6 +187,12 @@ uv run agentd --config ~/.agentd/agentd.toml config-check
 uv run agentd --config ~/.agentd/agentd.toml simulate-message --chat-id local-p2p 'Reply exactly with: pong'
 uv run agentd --config ~/.agentd/agentd.toml service doctor
 ```
+
+If validation reports missing `app_id` or `app_secret`, create or open your
+Feishu self-built app at <https://open.feishu.cn/app>, copy App ID and App
+Secret from "Credentials & Basic Info", then put them in `~/.agentd/agentd.toml`
+or export `AGENTD_FEISHU_APP_ID` and `AGENTD_FEISHU_APP_SECRET`. After that,
+rerun `config-check` and continue from the same setup step.
 
 After `config-check` is clean, run locally or install the service:
 
