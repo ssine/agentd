@@ -12,9 +12,37 @@ uv sync --dev
 
 This creates `.venv/` and installs `lark-oapi` for the Feishu WebSocket listener.
 
+## Setup
+
+There are two supported setup paths:
+
+- Agent-guided setup: paste the prompt below into Codex from this repository root and let the agent create the local config and context skeleton.
+- Manual setup: run the commands in the next section yourself.
+
+Agent-guided setup prompt:
+
+```text
+Help me set up agentd on this machine from the current cloned repository.
+
+Goals:
+- Install Python dependencies with uv.
+- Create ~/.agentd/agentd.toml if it does not exist.
+- Create ~/agent-context as my private context directory if it does not exist.
+- Initialize context.toml, schedules.toml, CONTEXT.md, memory/MEMORY.md, memory/projects/, and skills/.
+- Keep secrets out of Git by default; use environment variables or tell me exactly where to edit app_id/app_secret.
+- Set agentd.source_dir to this repository path and agentd.executable to .venv/bin/agentd.
+- Run config-check and explain any missing values.
+- If systemd --user is available, offer to install and start the service.
+
+Constraints:
+- Do not overwrite existing user files without showing me what would change.
+- Keep my context repository user-controlled; do not put runtime state there.
+- Use ~/.agentd/state for agentd runtime state.
+```
+
 ## Config
 
-Create local config files and fill secrets outside Git. `~/.agentd` is for agentd's own state; the context directory can be a separate user-managed git repo:
+Manual setup starts by creating local config files and filling secrets outside Git. `~/.agentd` is for agentd's own state; the context directory can be a separate user-managed git repo:
 
 ```bash
 mkdir -p ~/.agentd ~/agent-context
@@ -23,11 +51,62 @@ cp examples/context.example.toml ~/agent-context/context.toml
 cp examples/schedules.example.toml ~/agent-context/schedules.toml
 ```
 
+Create a minimal context skeleton:
+
+```bash
+mkdir -p ~/agent-context/memory/projects ~/agent-context/skills
+
+cat > ~/agent-context/CONTEXT.md <<'EOF'
+# CONTEXT.md
+
+This is my private agent context repository.
+
+- Runtime state belongs under ~/.agentd/state, not here.
+- Long-term searchable notes live under memory/.
+- Context-local skills live under skills/**/SKILL.md.
+EOF
+
+cat > ~/agent-context/memory/MEMORY.md <<'EOF'
+# Memory Index
+
+Search this directory with rg before loading deeper memory files.
+
+- Project notes: memory/projects/
+EOF
+
+cat > ~/agent-context/.gitignore <<'EOF'
+.env
+.venv/
+__pycache__/
+EOF
+```
+
+Edit `~/.agentd/agentd.toml`:
+
+- Set `agentd.source_dir` to this cloned repository path.
+- Keep `agentd.executable = ".venv/bin/agentd"` unless you use a different install path.
+- Keep `context.dir = "~/agent-context"` or point it at your own private context repository.
+
 Required Feishu fields can also be supplied by environment variables:
 
 ```bash
 export AGENTD_FEISHU_APP_ID=cli_xxx
 export AGENTD_FEISHU_APP_SECRET=xxx
+```
+
+Then validate the setup:
+
+```bash
+uv sync --dev
+uv run agentd --config ~/.agentd/agentd.toml config-check
+uv run agentd --config ~/.agentd/agentd.toml simulate-message --chat-id local-p2p 'Reply exactly with: pong'
+```
+
+After `config-check` is clean, run locally or install the service:
+
+```bash
+uv run agentd --config ~/.agentd/agentd.toml serve
+uv run agentd --config ~/.agentd/agentd.toml service install --enable --now
 ```
 
 Important path defaults:
