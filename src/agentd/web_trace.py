@@ -54,6 +54,7 @@ def load_exchange(row: sqlite3.Row) -> dict[str, Any]:
         'archive_member_request': row_value(row, 'archive_member_request'),
         'archive_member_response': row_value(row, 'archive_member_response'),
         'request_json': request_json,
+        'response_json': response['json'],
         'response_text': response['text'],
         'response_message': {'role': 'assistant', 'content': response['text']},
         'usage': response['usage'],
@@ -71,6 +72,7 @@ def exchange_detail(exchange: dict[str, Any]) -> dict[str, Any]:
         'upstream_url': exchange.get('upstream_url'),
         'provider_id': exchange.get('provider_id'),
         'request_json': request_json,
+        'response_json': exchange.get('response_json'),
         'request_input_count': len(input_items),
         'request_input_items': [
             request_input_item_detail(item, index) for index, item in enumerate(input_items) if isinstance(item, dict)
@@ -193,26 +195,30 @@ def normalize_input_items(value: Any) -> list[Any]:
 def parse_response_body(raw: bytes) -> dict[str, Any]:
     body = raw.strip()
     if not body:
-        return {'text': '', 'usage': {}}
+        return {'json': None, 'text': '', 'usage': {}}
     if body.startswith(b'{'):
         payload = parse_json_bytes(body)
-        return {'text': extract_response_text(payload), 'usage': normalize_usage(find_usage(payload))}
+        return {'json': payload, 'text': extract_response_text(payload), 'usage': normalize_usage(find_usage(payload))}
 
     text_parts: list[str] = []
     usage: dict[str, Any] = {}
     completed_text = ''
-    for payload in iter_sse_payloads(raw):
+    completed_response: dict[str, Any] | None = None
+    payloads = iter_sse_payloads(raw)
+    for payload in payloads:
         event_type = str(payload.get('type') or '')
         delta = payload.get('delta')
         if isinstance(delta, str) and 'output_text.delta' in event_type:
             text_parts.append(delta)
         response = payload.get('response') if isinstance(payload.get('response'), dict) else None
         if response:
+            completed_response = response
             completed_text = extract_response_text(response) or completed_text
             usage = normalize_usage(find_usage(response)) or usage
         usage = normalize_usage(find_usage(payload)) or usage
     text = completed_text or ''.join(text_parts)
-    return {'text': text, 'usage': usage}
+    response_json: dict[str, Any] | None = completed_response or ({'events': payloads} if payloads else None)
+    return {'json': response_json, 'text': text, 'usage': usage}
 
 
 def iter_sse_payloads(raw: bytes) -> list[dict[str, Any]]:

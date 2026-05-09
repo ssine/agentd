@@ -123,6 +123,7 @@ class WebTraceTest(unittest.TestCase):
             detail = exchange_detail(load_exchange(row))
 
             self.assertEqual(detail['response_text'], 'compressed hi')
+            self.assertEqual(detail['response_json']['output'][0]['content'][0]['text'], 'compressed hi')
             self.assertEqual(detail['codex_turn_id'], 'turn-zstd')
             self.assertEqual(detail['request_input_items'][1]['content'], 'compressed hello')
 

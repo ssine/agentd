@@ -387,10 +387,9 @@ INDEX_HTML = r"""<!doctype html>
       font: inherit;
       font-size: 12px;
     }
-    .json {
-      max-height: 360px;
+    .json-tree {
+      max-height: 460px;
       overflow: auto;
-      white-space: pre-wrap;
       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
       font-size: 12px;
       line-height: 1.45;
@@ -398,6 +397,68 @@ INDEX_HTML = r"""<!doctype html>
       border-radius: 6px;
       padding: 10px;
       background: rgba(127, 127, 127, 0.06);
+    }
+    .json-node {
+      margin: 2px 0;
+    }
+    .json-node summary {
+      cursor: pointer;
+      list-style-position: outside;
+      overflow-wrap: anywhere;
+    }
+    .json-summary {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .json-actions {
+      display: inline-flex;
+      gap: 4px;
+    }
+    button.json-action {
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      padding: 1px 6px;
+      background: transparent;
+      color: var(--muted);
+      cursor: pointer;
+      font: inherit;
+      font-size: 11px;
+      line-height: 1.35;
+    }
+    button.json-action:hover {
+      color: var(--text);
+      border-color: var(--accent);
+    }
+    .json-children {
+      margin-left: 14px;
+      padding-left: 10px;
+      border-left: 1px solid var(--line);
+    }
+    .json-row {
+      padding: 2px 0;
+      overflow-wrap: anywhere;
+    }
+    .json-key { color: var(--muted); }
+    .json-string { color: #168a4a; }
+    .json-number, .json-boolean { color: #b54708; }
+    .json-null { color: var(--muted); }
+    .json-punctuation { color: var(--muted); }
+    .json-text-block {
+      display: block;
+      margin: 4px 0 8px;
+      border: 1px solid rgba(36, 107, 254, 0.28);
+      border-radius: 6px;
+      background: rgba(36, 107, 254, 0.08);
+      overflow: hidden;
+    }
+    .json-text-block pre {
+      margin: 0;
+      padding: 10px;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     }
     .request-meta {
       margin-top: 8px;
@@ -450,8 +511,13 @@ let selectedSessionId = null;
 let sending = false;
 let openExchangeIds = new Set();
 let openExchangeDetailSections = new Set();
+let openJsonNodeKeys = new Set();
 let renderedMessagesRunId = null;
+let lastRunsSignature = '';
+let lastMessagesSignature = '';
+let lastTraceSignature = '';
 const exchangeDetailCache = new Map();
+const exchangeDetailScrollTops = new Map();
 
 function esc(value) {
   return String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
@@ -474,9 +540,28 @@ function renderState(state) {
   selectedRunId = selected ? selected.id : selectedRunId;
   selectedSessionId = state.selected_session ? state.selected_session.id : null;
   document.getElementById('sync').textContent = new Date().toLocaleTimeString();
-  renderRuns(state.runs || [], selectedRunId);
-  renderMessages(selected, state.events || []);
-  renderTrace(state.trace || {});
+  const runs = state.runs || [];
+  const events = state.events || [];
+  const trace = state.trace || {};
+  const runsSignature = signature([selectedRunId, runs]);
+  if (runsSignature !== lastRunsSignature) {
+    renderRuns(runs, selectedRunId);
+    lastRunsSignature = runsSignature;
+  }
+  const messagesSignature = signature([selected, events]);
+  if (messagesSignature !== lastMessagesSignature) {
+    renderMessages(selected, events);
+    lastMessagesSignature = messagesSignature;
+  }
+  const traceSignature = signature([selectedRunId, trace]);
+  if (traceSignature !== lastTraceSignature) {
+    renderTrace(trace);
+    lastTraceSignature = traceSignature;
+  }
+}
+
+function signature(value) {
+  return JSON.stringify(value ?? null);
 }
 
 function renderRuns(runs, activeId) {
@@ -558,11 +643,15 @@ function renderTrace(trace) {
   const root = document.getElementById('trace');
   const exchanges = trace.exchanges || [];
   document.getElementById('traceStats').textContent = `${exchanges.length} requests`;
+  captureExchangeScrollPositions(root);
+  const previousScrollTop = root.scrollTop;
   if (!exchanges.length) {
     root.innerHTML = '<div class="empty">暂无请求捕获</div>';
+    root.scrollTop = previousScrollTop;
     return;
   }
   root.innerHTML = exchanges.map(exchange => renderExchangeSummary(exchange, openExchangeIds.has(String(exchange.id || '')))).join('');
+  root.scrollTop = previousScrollTop;
   root.querySelectorAll('details[data-exchange-id]').forEach(details => {
     details.addEventListener('toggle', () => {
       const id = details.dataset.exchangeId || '';
@@ -574,6 +663,12 @@ function renderTrace(trace) {
       }
     });
     if (details.open) loadExchangeDetail(details);
+  });
+}
+
+function captureExchangeScrollPositions(root) {
+  root.querySelectorAll('[data-scroll-key]').forEach(element => {
+    exchangeDetailScrollTops.set(element.dataset.scrollKey || '', element.scrollTop);
   });
 }
 
@@ -622,32 +717,18 @@ async function loadExchangeDetail(details) {
 }
 
 function renderExchangeDetail(exchange, exchangeId) {
-  const inputItems = exchange.request_input_items || [];
-  const inputHtml = inputItems.length
-    ? inputItems.map(item => `<div class="message ${roleClass(item.role)}">
-        <div class="role">#${esc(item.index)} ${esc(item.role || 'item')}${item.type ? ' · ' + esc(item.type) : ''}</div>
-        <div class="content">${esc(item.content || '(empty)')}</div>
-      </div>`).join('')
-    : '<div class="empty">无 request input</div>';
-  const responseText = exchange.response_text || '';
-  const rawRequest = exchange.request_json ? JSON.stringify(exchange.request_json, null, 2) : '';
   return `
     <div class="request-meta">
-      <span>input items ${esc(exchange.request_input_count || 0)}</span>
       ${exchange.upstream_url ? `<span>${esc(exchange.upstream_url)}</span>` : ''}
       ${exchange.codex_turn_id ? `<span>turn ${esc(exchange.codex_turn_id)}</span>` : ''}
     </div>
-    <div class="message assistant">
-      <div class="role">response</div>
-      <div class="content">${esc(responseText || '(empty)')}</div>
-    </div>
-    <details data-detail-section="input" ${isExchangeDetailSectionOpen(exchangeId, 'input') ? 'open' : ''}>
-      <summary>request input</summary>
-      ${inputHtml}
+    <details data-detail-section="request" ${isExchangeDetailSectionOpen(exchangeId, 'request', true) ? 'open' : ''}>
+      <summary>request</summary>
+      ${renderJsonTree(exchange.request_json ?? {}, exchangeId, 'request')}
     </details>
-    <details data-detail-section="raw" ${isExchangeDetailSectionOpen(exchangeId, 'raw') ? 'open' : ''}>
-      <summary>raw request JSON</summary>
-      <pre class="json">${esc(rawRequest || '{}')}</pre>
+    <details data-detail-section="response" ${isExchangeDetailSectionOpen(exchangeId, 'response', true) ? 'open' : ''}>
+      <summary>response</summary>
+      ${renderJsonTree(exchange.response_json ?? {}, exchangeId, 'response')}
     </details>
   `;
 }
@@ -659,19 +740,156 @@ function wireExchangeDetail(details) {
       const key = exchangeDetailSectionKey(exchangeId, section.dataset.detailSection || '');
       if (section.open) {
         openExchangeDetailSections.add(key);
+        openExchangeDetailSections.delete(`${key}:closed`);
       } else {
         openExchangeDetailSections.delete(key);
+        openExchangeDetailSections.add(`${key}:closed`);
       }
+    });
+  });
+  details.querySelectorAll('.json-node[data-json-node-key]').forEach(node => {
+    node.addEventListener('toggle', () => {
+      const key = node.dataset.jsonNodeKey || '';
+      if (node.open) {
+        openJsonNodeKeys.add(key);
+        openJsonNodeKeys.delete(`${key}:closed`);
+      } else {
+        openJsonNodeKeys.delete(key);
+        openJsonNodeKeys.add(`${key}:closed`);
+      }
+    });
+  });
+  details.querySelectorAll('button[data-json-action]').forEach(button => {
+    button.addEventListener('click', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      const key = button.dataset.jsonNodeKey || '';
+      const node = button.closest('.json-node');
+      if (!node) return;
+      setJsonSubtreeOpen(node, key, button.dataset.jsonAction === 'expand');
+    });
+  });
+  details.querySelectorAll('[data-scroll-key]').forEach(element => {
+    const key = element.dataset.scrollKey || '';
+    if (exchangeDetailScrollTops.has(key)) {
+      element.scrollTop = exchangeDetailScrollTops.get(key);
+    }
+    element.addEventListener('scroll', () => {
+      exchangeDetailScrollTops.set(key, element.scrollTop);
     });
   });
 }
 
-function isExchangeDetailSectionOpen(exchangeId, section) {
-  return openExchangeDetailSections.has(exchangeDetailSectionKey(exchangeId, section));
+function isExchangeDetailSectionOpen(exchangeId, section, defaultOpen = false) {
+  const key = exchangeDetailSectionKey(exchangeId, section);
+  return openExchangeDetailSections.has(key) || (defaultOpen && !openExchangeDetailSections.has(`${key}:closed`));
 }
 
 function exchangeDetailSectionKey(exchangeId, section) {
   return `${exchangeId}:${section}`;
+}
+
+function exchangeDetailScrollKey(exchangeId, section) {
+  return `${exchangeId}:${section}:scroll`;
+}
+
+function renderJsonTree(value, exchangeId, label) {
+  const scrollKey = exchangeDetailScrollKey(exchangeId, `${label}-json`);
+  return `<div class="json-tree" data-scroll-key="${esc(scrollKey)}">
+    ${renderJsonValue(value, jsonNodeKey(exchangeId, label, '$'), 0)}
+  </div>`;
+}
+
+function renderJsonValue(value, nodeKey, depth) {
+  if (Array.isArray(value)) return renderJsonArray(value, nodeKey, depth);
+  if (value && typeof value === 'object') return renderJsonObject(value, nodeKey, depth);
+  if (typeof value === 'string') return renderJsonString(value);
+  if (typeof value === 'number') return `<span class="json-number">${esc(String(value))}</span>`;
+  if (typeof value === 'boolean') return `<span class="json-boolean">${esc(String(value))}</span>`;
+  if (value === null) return '<span class="json-null">null</span>';
+  return `<span>${esc(JSON.stringify(value))}</span>`;
+}
+
+function renderJsonObject(value, nodeKey, depth) {
+  const entries = Object.entries(value);
+  const open = isJsonNodeOpen(nodeKey, depth);
+  return `<details class="json-node" data-json-node-key="${esc(nodeKey)}" ${open ? 'open' : ''}>
+    <summary>${renderJsonNodeSummary('{}', `${entries.length} keys`, nodeKey)}</summary>
+    <div class="json-children">
+      ${entries.map(([key, item]) => renderJsonMember(JSON.stringify(key), item, `${nodeKey}.${escapeJsonPathKey(key)}`, depth + 1)).join('')}
+    </div>
+  </details>`;
+}
+
+function renderJsonArray(value, nodeKey, depth) {
+  const open = isJsonNodeOpen(nodeKey, depth);
+  return `<details class="json-node" data-json-node-key="${esc(nodeKey)}" ${open ? 'open' : ''}>
+    <summary>${renderJsonNodeSummary('[]', `${value.length} items`, nodeKey)}</summary>
+    <div class="json-children">
+      ${value.map((item, index) => renderJsonMember(`[${index}]`, item, `${nodeKey}[${index}]`, depth + 1)).join('')}
+    </div>
+  </details>`;
+}
+
+function renderJsonMember(label, value, nodeKey, depth) {
+  return `<div class="json-row">
+    <span class="json-key">${esc(label)}</span><span class="json-punctuation">: </span>${renderJsonValue(value, nodeKey, depth)}
+  </div>`;
+}
+
+function renderJsonNodeSummary(shape, count, nodeKey) {
+  return `<span class="json-summary">
+    <span><span class="json-punctuation">${esc(shape)}</span> <span class="json-punctuation">${esc(count)}</span></span>
+    <span class="json-actions">
+      <button class="json-action" type="button" data-json-action="expand" data-json-node-key="${esc(nodeKey)}">递归展开</button>
+      <button class="json-action" type="button" data-json-action="collapse" data-json-node-key="${esc(nodeKey)}">递归折叠</button>
+    </span>
+  </span>`;
+}
+
+function renderJsonString(value) {
+  if (value.includes('\n')) {
+    return `<div class="json-text-block"><pre>${esc(value)}</pre></div>`;
+  }
+  return `<span class="json-string">${esc(JSON.stringify(value))}</span>`;
+}
+
+function isJsonNodeOpen(nodeKey, depth) {
+  return openJsonNodeKeys.has(nodeKey) || (depth <= 1 && !openJsonNodeKeys.has(`${nodeKey}:closed`));
+}
+
+function setJsonSubtreeOpen(rootNode, rootKey, open) {
+  const nodes = [rootNode, ...rootNode.querySelectorAll('.json-node[data-json-node-key]')];
+  nodes.forEach(node => {
+    const key = node.dataset.jsonNodeKey || '';
+    node.open = open;
+    if (open) {
+      openJsonNodeKeys.add(key);
+      openJsonNodeKeys.delete(`${key}:closed`);
+    } else {
+      openJsonNodeKeys.delete(key);
+      openJsonNodeKeys.add(`${key}:closed`);
+    }
+  });
+  if (rootKey) {
+    if (open) {
+      openJsonNodeKeys.add(rootKey);
+      openJsonNodeKeys.delete(`${rootKey}:closed`);
+    } else {
+      openJsonNodeKeys.delete(rootKey);
+      openJsonNodeKeys.add(`${rootKey}:closed`);
+    }
+  }
+}
+
+function jsonNodeKey(exchangeId, label, path) {
+  return `${exchangeId}:${label}:${path}`;
+}
+
+function escapeJsonPathKey(key) {
+  return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(key)
+    ? key
+    : `[${JSON.stringify(key)}]`;
 }
 
 function roleClass(role) {
