@@ -40,11 +40,13 @@ Feishu's `tenant_access_token/internal` API at runtime.
 
 In Feishu Open Platform:
 
-1. Create a self-built app and add the Bot capability.
-2. In "Events & Callbacks", choose long connection/WebSocket event receiving.
-3. Subscribe to `im.message.receive_v1` ("Receive Message v2.0").
-4. Subscribe to `card.action.trigger` ("Card Action Interaction") so status-card buttons work.
-5. Add the required permissions, then create a version and publish it.
+1. Open <https://open.feishu.cn/app> and create a Feishu "智能体应用" / self-built app.
+2. Add the Bot capability.
+3. Open `https://open.feishu.cn/app/{app_id}/event?tab=callback`, replacing `{app_id}` with your app ID such as `cli_xxx`.
+4. In the callback/event subscription page, choose long connection/WebSocket event receiving.
+5. Subscribe to `im.message.receive_v1` ("Receive Message v2.0").
+6. Subscribe to `card.action.trigger` ("Card Action Interaction" / "卡片回传交互") so status-card buttons work.
+7. Add the required permissions, then create a version and publish it.
 
 Minimum permissions:
 
@@ -86,6 +88,8 @@ Goals:
 - Run `uv run agentd --config ~/.agentd/agentd.toml init` to create ~/.agentd/agentd.toml and ~/agent-context if they do not exist.
 - Initialize context.toml, schedules.toml, CONTEXT.md, memory/MEMORY.md, memory/projects/, and skills/ through that command.
 - Ask me for my Feishu self-built app App ID and App Secret; explain that agentd needs app credentials, not a tenant_access_token or webhook secret.
+- Tell me to create the Feishu app at https://open.feishu.cn/app if needed.
+- Tell me to open https://open.feishu.cn/app/{app_id}/event?tab=callback after replacing `{app_id}` with my app ID, then add the `card.action.trigger` / "卡片回传交互" callback subscription.
 - Confirm the Feishu app has Bot capability, long-connection events `im.message.receive_v1` and `card.action.trigger`, and the permissions documented in README.
 - Keep secrets out of Git by default; use environment variables or tell me exactly where to edit app_id/app_secret.
 - Set agentd.source_dir to this repository path and agentd.executable to .venv/bin/agentd.
