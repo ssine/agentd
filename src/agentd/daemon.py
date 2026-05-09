@@ -6,8 +6,11 @@ import logging
 import socket
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from datetime import datetime
+from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from .codex_app_server import CodexAppServer, CodexRunControl
 from .config import AgentdConfig
@@ -24,7 +27,7 @@ from .models import (
     TitleRequest,
 )
 from .registry import Registry
-from .schedule import ScheduleJob, due_run_key
+from .schedule import ScheduleConfig, ScheduleJob, due_run_key, load_schedule_config
 from .title import normalize_title, title_from_text
 
 STATUS_TICK_SECONDS = 5
@@ -32,6 +35,7 @@ STATUS_UPDATE_MIN_INTERVAL_SECONDS = 1
 FEISHU_SEND_MIN_INTERVAL_SECONDS = 1
 TERMINAL_STATUS_REPLAY_DELAY_SECONDS = 3
 TERMINAL_STATUS_PHASES = {'done', 'failed', 'stopped'}
+SCHEDULE_POLL_SECONDS = 30
 
 
 @dataclass
@@ -63,6 +67,14 @@ class RunView:
     model_outputs: list[str]
 
 
+@dataclass(frozen=True)
+class ScheduleFileFingerprint:
+    exists: bool
+    mtime_ns: int = 0
+    size: int = 0
+    digest: str = ''
+
+
 class AgentDaemon:
     def __init__(self, config: AgentdConfig, *, dry_send: bool = False) -> None:
         self.config = config
@@ -80,6 +92,8 @@ class AgentDaemon:
         self._spawn_watcher_lock = threading.Lock()
         self._scheduler_started = False
         self._scheduler_lock = threading.Lock()
+        self._schedule_config_lock = threading.Lock()
+        self._schedule_fingerprint = self._schedule_file_fingerprint(config.schedules.path)
         self._web_gateway: Any | None = None
         self._web_gateway_lock = threading.Lock()
 
@@ -198,8 +212,6 @@ class AgentDaemon:
             clear_startup_notice(self.config)
 
     def _ensure_scheduler(self) -> None:
-        if not any(job.enabled for job in self.config.schedules.jobs):
-            return
         with self._scheduler_lock:
             if self._scheduler_started:
                 return
@@ -209,14 +221,88 @@ class AgentDaemon:
     def _schedule_watcher(self) -> None:
         while True:
             try:
-                for job in self.config.schedules.jobs:
+                self._reload_schedule_config_if_changed()
+                for job in self._schedule_jobs_snapshot():
                     self._maybe_start_scheduled_job(job)
             except Exception:
                 self.log.exception('failed while polling scheduled jobs')
-            time.sleep(30)
+            time.sleep(SCHEDULE_POLL_SECONDS)
 
-    def _maybe_start_scheduled_job(self, job: ScheduleJob) -> None:
-        run_key = due_run_key(job)
+    def _schedule_jobs_snapshot(self) -> tuple[ScheduleJob, ...]:
+        with self._schedule_config_lock:
+            return self.config.schedules.jobs
+
+    def _reload_schedule_config_if_changed(self, now: datetime | None = None) -> bool:
+        path = self.config.schedules.path
+        fingerprint = self._schedule_file_fingerprint(path)
+        with self._schedule_config_lock:
+            if fingerprint == self._schedule_fingerprint:
+                return False
+            previous = self.config.schedules
+
+        loaded = load_schedule_config(path)
+        self._suppress_reloaded_daily_backfill(previous, loaded, now=now)
+
+        with self._schedule_config_lock:
+            self.config = replace(self.config, schedules=loaded)
+            self._schedule_fingerprint = fingerprint
+
+        enabled_count = sum(1 for job in loaded.jobs if job.enabled)
+        self.log.info('reloaded schedule config %s: %s jobs, %s enabled', path, len(loaded.jobs), enabled_count)
+        return True
+
+    def _suppress_reloaded_daily_backfill(
+        self,
+        previous: ScheduleConfig,
+        loaded: ScheduleConfig,
+        *,
+        now: datetime | None = None,
+    ) -> None:
+        previous_by_id = {job.id: job for job in previous.jobs}
+        now = now or datetime.now(tz=ZoneInfo('UTC'))
+        for job in loaded.jobs:
+            if not self._daily_reload_backfill_guard_required(previous_by_id.get(job.id), job, now):
+                continue
+            run_key = due_run_key(job, now)
+            if run_key and self.registry.claim_schedule_run(job.id, run_key):
+                self.log.info('marked newly due daily schedule %s run %s as already handled after reload', job.id, run_key)
+
+    def _daily_reload_backfill_guard_required(
+        self,
+        previous: ScheduleJob | None,
+        job: ScheduleJob,
+        now: datetime,
+    ) -> bool:
+        if not job.enabled or job.kind != 'daily' or not job.chat_id or not job.prompt:
+            return False
+        if not due_run_key(job, now):
+            return False
+        if previous is None:
+            return True
+        if not previous.enabled or previous.kind != 'daily' or not previous.chat_id or not previous.prompt:
+            return True
+        return self._daily_schedule_key(previous) != self._daily_schedule_key(job)
+
+    @staticmethod
+    def _daily_schedule_key(job: ScheduleJob) -> tuple[str, str, str]:
+        return (job.kind, job.timezone, job.time)
+
+    @staticmethod
+    def _schedule_file_fingerprint(path: Path) -> ScheduleFileFingerprint:
+        try:
+            data = path.read_bytes()
+            stat = path.stat()
+        except FileNotFoundError:
+            return ScheduleFileFingerprint(exists=False)
+        return ScheduleFileFingerprint(
+            exists=True,
+            mtime_ns=stat.st_mtime_ns,
+            size=stat.st_size,
+            digest=hashlib.sha256(data).hexdigest(),
+        )
+
+    def _maybe_start_scheduled_job(self, job: ScheduleJob, now: datetime | None = None) -> None:
+        run_key = due_run_key(job, now)
         if not run_key:
             return
         if not job.chat_id or not job.prompt:
