@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 import tempfile
 import unittest
 from pathlib import Path
@@ -94,6 +95,10 @@ class WebTraceTest(unittest.TestCase):
             state = build_state(registry, selected_run_id=first.id)
 
             self.assertEqual([item['codex_turn_id'] for item in state['trace']['exchanges']], ['turn-1'])
+            self.assertEqual(
+                state['selected_run']['codex_resume_command'],
+                f'cd {shlex.quote(str(root))} && codex resume thread',
+            )
 
     def test_decodes_zstd_compressed_request_body(self) -> None:
         with tempfile.TemporaryDirectory() as raw_dir:

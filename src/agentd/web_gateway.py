@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 import threading
 import time
 from dataclasses import asdict, is_dataclass
@@ -177,10 +178,13 @@ def build_state(registry: Registry, *, selected_run_id: int | None = None) -> di
         limit=250,
     )
     trace = build_responses_trace(trace_rows)
+    selected_run = record_to_dict(selected) if selected is not None else None
+    if selected_run is not None and selected is not None:
+        selected_run['codex_resume_command'] = codex_resume_command(selected, selected_session)
     return {
         'sessions': [record_to_dict(session) for session in sessions],
         'runs': [record_to_dict(run) for run in runs],
-        'selected_run': record_to_dict(selected) if selected is not None else None,
+        'selected_run': selected_run,
         'selected_session': record_to_dict(selected_session) if selected_session is not None else None,
         'events': [
             {
@@ -194,6 +198,15 @@ def build_state(registry: Registry, *, selected_run_id: int | None = None) -> di
         ],
         'trace': trace,
     }
+
+
+def codex_resume_command(run: Any, session: Any | None) -> str:
+    thread_id = str(getattr(run, 'codex_thread_id', '') or '')
+    if not thread_id:
+        return ''
+    command = shlex.join(['codex', 'resume', thread_id])
+    cwd = str(getattr(session, 'cwd', '') or '')
+    return f'cd {shlex.quote(cwd)} && {command}' if cwd else command
 
 
 def record_to_dict(value: Any) -> dict[str, Any]:
@@ -357,6 +370,23 @@ INDEX_HTML = r"""<!doctype html>
     .exchange-title { font-weight: 650; }
     .exchange-preview { margin-top: 8px; color: var(--muted); font-size: 12px; }
     .exchange-detail { margin-top: 10px; }
+    .resume-command code {
+      display: block;
+      margin-top: 8px;
+      white-space: pre-wrap;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 12px;
+    }
+    button.copy {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 4px 8px;
+      background: transparent;
+      color: inherit;
+      cursor: pointer;
+      font: inherit;
+      font-size: 12px;
+    }
     .json {
       max-height: 360px;
       overflow: auto;
@@ -420,6 +450,8 @@ let selectedRunId = null;
 let selectedSessionId = null;
 let sending = false;
 let openExchangeIds = new Set();
+let openExchangeDetailSections = new Set();
+let renderedMessagesRunId = null;
 const exchangeDetailCache = new Map();
 
 function esc(value) {
@@ -475,10 +507,21 @@ function renderMessages(run, events) {
   const root = document.getElementById('messages');
   document.getElementById('runStatus').textContent = run ? `#${run.id} ${run.status}` : '';
   if (!run) {
+    renderedMessagesRunId = null;
     root.innerHTML = '<div class="empty">暂无对话</div>';
     return;
   }
+  const runChanged = renderedMessagesRunId !== run.id;
+  const previousScrollTop = root.scrollTop;
+  const shouldFollowBottom = runChanged || isScrolledToBottom(root);
   const blocks = [`<div class="message user"><div class="role">user</div><div class="content">${esc(run.prompt || '')}</div></div>`];
+  if (run.codex_resume_command) {
+    blocks.push(`<div class="event resume-command">
+      <div class="role">codex resume</div>
+      <button class="copy" type="button" data-copy="${esc(run.codex_resume_command)}">复制命令</button>
+      <code>${esc(run.codex_resume_command)}</code>
+    </div>`);
+  }
   for (const event of events) {
     const payload = event.payload || {};
     if (event.event_type === 'agent_message') {
@@ -491,7 +534,25 @@ function renderMessages(run, events) {
     }
   }
   root.innerHTML = blocks.join('');
-  root.scrollTop = root.scrollHeight;
+  root.querySelectorAll('button[data-copy]').forEach(button => {
+    button.addEventListener('click', async () => {
+      const text = button.dataset.copy || '';
+      try {
+        await navigator.clipboard.writeText(text);
+        button.textContent = '已复制';
+        setTimeout(() => { button.textContent = '复制命令'; }, 1200);
+      } catch {
+        window.prompt('复制命令', text);
+      }
+    });
+  });
+  renderedMessagesRunId = run.id;
+  root.scrollTop = shouldFollowBottom ? root.scrollHeight : previousScrollTop;
+}
+
+function isScrolledToBottom(element) {
+  return element.scrollHeight <= element.clientHeight
+    || element.scrollHeight - element.scrollTop - element.clientHeight <= 12;
 }
 
 function renderTrace(trace) {
@@ -536,7 +597,8 @@ async function loadExchangeDetail(details) {
   const root = details.querySelector('.exchange-detail');
   if (exchangeDetailCache.has(id)) {
     root.classList.remove('muted');
-    root.innerHTML = renderExchangeDetail(exchangeDetailCache.get(id));
+    root.innerHTML = renderExchangeDetail(exchangeDetailCache.get(id), id);
+    wireExchangeDetail(details);
     details.dataset.loaded = '1';
     return;
   }
@@ -549,7 +611,8 @@ async function loadExchangeDetail(details) {
     if (!response.ok || !result.ok) throw new Error(result.error || 'load failed');
     exchangeDetailCache.set(id, result.exchange || {});
     root.classList.remove('muted');
-    root.innerHTML = renderExchangeDetail(result.exchange || {});
+    root.innerHTML = renderExchangeDetail(result.exchange || {}, id);
+    wireExchangeDetail(details);
     details.dataset.loaded = '1';
   } catch (error) {
     root.classList.add('muted');
@@ -559,7 +622,7 @@ async function loadExchangeDetail(details) {
   }
 }
 
-function renderExchangeDetail(exchange) {
+function renderExchangeDetail(exchange, exchangeId) {
   const inputItems = exchange.request_input_items || [];
   const inputHtml = inputItems.length
     ? inputItems.map(item => `<div class="message ${roleClass(item.role)}">
@@ -579,15 +642,37 @@ function renderExchangeDetail(exchange) {
       <div class="role">response</div>
       <div class="content">${esc(responseText || '(empty)')}</div>
     </div>
-    <details>
+    <details data-detail-section="input" ${isExchangeDetailSectionOpen(exchangeId, 'input') ? 'open' : ''}>
       <summary>request input</summary>
       ${inputHtml}
     </details>
-    <details>
+    <details data-detail-section="raw" ${isExchangeDetailSectionOpen(exchangeId, 'raw') ? 'open' : ''}>
       <summary>raw request JSON</summary>
       <pre class="json">${esc(rawRequest || '{}')}</pre>
     </details>
   `;
+}
+
+function wireExchangeDetail(details) {
+  const exchangeId = details.dataset.exchangeId || '';
+  details.querySelectorAll('.exchange-detail details[data-detail-section]').forEach(section => {
+    section.addEventListener('toggle', () => {
+      const key = exchangeDetailSectionKey(exchangeId, section.dataset.detailSection || '');
+      if (section.open) {
+        openExchangeDetailSections.add(key);
+      } else {
+        openExchangeDetailSections.delete(key);
+      }
+    });
+  });
+}
+
+function isExchangeDetailSectionOpen(exchangeId, section) {
+  return openExchangeDetailSections.has(exchangeDetailSectionKey(exchangeId, section));
+}
+
+function exchangeDetailSectionKey(exchangeId, section) {
+  return `${exchangeId}:${section}`;
 }
 
 function roleClass(role) {
