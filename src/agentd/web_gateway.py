@@ -436,20 +436,16 @@ INDEX_HTML = r"""<!doctype html>
     .json-collapsed-value {
       display: inline-block;
       margin: 0;
+      max-width: 100%;
+      cursor: pointer;
       vertical-align: top;
     }
-    .json-collapsed-value > summary {
-      display: inline;
-      list-style: none;
+    .json-collapsed-value.is-open .json-node summary,
+    .json-collapsed-value.is-open button {
+      cursor: pointer;
     }
-    .json-collapsed-value > summary::marker {
-      content: "";
-    }
-    .json-collapsed-value > summary::-webkit-details-marker {
-      display: none;
-    }
-    .json-collapsed-value > .json-children {
-      margin-top: 2px;
+    .json-key[data-json-collapsed-toggle] {
+      cursor: pointer;
     }
     .json-summary {
       display: inline-flex;
@@ -841,6 +837,7 @@ function wireExchangeDetail(details) {
       setJsonSubtreeOpen(node, key, button.dataset.jsonAction === 'expand');
     });
   });
+  wireCollapsedJsonToggle(details);
   details.querySelectorAll('[data-scroll-key]').forEach(element => {
     const key = element.dataset.scrollKey || '';
     if (exchangeDetailScrollTops.has(key)) {
@@ -849,6 +846,39 @@ function wireExchangeDetail(details) {
     element.addEventListener('scroll', () => {
       exchangeDetailScrollTops.set(key, element.scrollTop);
     });
+  });
+}
+
+function wireCollapsedJsonToggle(details) {
+  if (details.dataset.jsonCollapsedToggleWired === '1') return;
+  details.dataset.jsonCollapsedToggleWired = '1';
+  details.addEventListener('click', event => {
+    const target = event.target instanceof Element ? event.target : event.target?.parentElement;
+    if (!target) return;
+    const toggle = target.closest('[data-json-collapsed-toggle][data-json-node-key]');
+    if (!toggle || !details.contains(toggle)) return;
+    if (target.closest('button, a, input, textarea, select')) return;
+    const key = toggle.dataset.jsonNodeKey || '';
+    const summary = target.closest('.json-node summary');
+    if (summary && toggle.contains(summary)) {
+      const node = summary.closest('.json-node');
+      if ((node?.dataset.jsonNodeKey || '') !== `${key}.$value`) return;
+    } else if (target.closest('.json-node') && toggle.contains(target.closest('.json-node'))) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    toggleCollapsedJsonValue(details, details.dataset.exchangeId || '', key);
+  });
+  details.addEventListener('keydown', event => {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    const target = event.target instanceof Element ? event.target : event.target?.parentElement;
+    if (!target) return;
+    if (!target.matches('[data-json-collapsed-toggle][data-json-node-key]')) return;
+    if (!details.contains(target)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    toggleCollapsedJsonValue(details, details.dataset.exchangeId || '', target.dataset.jsonNodeKey || '');
   });
 }
 
@@ -908,9 +938,9 @@ function renderJsonArray(value, nodeKey, depth) {
 }
 
 function renderJsonMember(label, value, nodeKey, depth) {
-  if (isCollapsedResponseField(nodeKey)) {
+  if (isCollapsedJsonField(nodeKey)) {
     return `<div class="json-row">
-      <span class="json-key">${esc(label)}</span><span class="json-punctuation">: </span>${renderCollapsedJsonValue(value, nodeKey, depth)}
+      <span class="json-key" data-json-collapsed-toggle="1" data-json-node-key="${esc(nodeKey)}" role="button" tabindex="0">${esc(label)}</span><span class="json-punctuation">: </span>${renderCollapsedJsonValue(value, nodeKey, depth)}
     </div>`;
   }
   return `<div class="json-row">
@@ -920,12 +950,10 @@ function renderJsonMember(label, value, nodeKey, depth) {
 
 function renderCollapsedJsonValue(value, nodeKey, depth) {
   const open = openJsonNodeKeys.has(nodeKey) && !openJsonNodeKeys.has(`${nodeKey}:closed`);
-  return `<details class="json-node json-collapsed-value" data-json-node-key="${esc(nodeKey)}" ${open ? 'open' : ''}>
-    <summary><span class="json-punctuation">...</span></summary>
-    <div class="json-children">
-      ${renderJsonValue(value, `${nodeKey}.$value`, depth + 1)}
-    </div>
-  </details>`;
+  const isComplex = Array.isArray(value) || (value && typeof value === 'object');
+  const tag = open && isComplex ? 'div' : 'span';
+  const content = open ? renderJsonValue(value, `${nodeKey}.$value`, depth + 1) : '<span class="json-punctuation">...</span>';
+  return `<${tag} class="json-collapsed-value ${open ? 'is-open' : ''}" data-json-collapsed-toggle="1" data-json-node-key="${esc(nodeKey)}" role="button" tabindex="0">${content}</${tag}>`;
 }
 
 function renderJsonNodeSummary(shape, count, nodeKey) {
@@ -971,17 +999,27 @@ const RESPONSE_COLLAPSED_FIELDS = new Set([
   'moderation'
 ]);
 
-function isCollapsedResponseField(nodeKey) {
-  const marker = ':response:$.';
+const REQUEST_COLLAPSED_FIELDS = new Set([
+  'instructions'
+]);
+
+function isCollapsedJsonField(nodeKey) {
+  const responsePath = topLevelJsonPathAfterMarker(nodeKey, ':response:$.');
+  if (responsePath && RESPONSE_COLLAPSED_FIELDS.has(responsePath)) return true;
+  const requestPath = topLevelJsonPathAfterMarker(nodeKey, ':request:$.');
+  return Boolean(requestPath && REQUEST_COLLAPSED_FIELDS.has(requestPath));
+}
+
+function topLevelJsonPathAfterMarker(nodeKey, marker) {
   const markerIndex = nodeKey.indexOf(marker);
-  if (markerIndex < 0) return false;
+  if (markerIndex < 0) return '';
   const path = nodeKey.slice(markerIndex + marker.length);
-  if (!path || path.includes('.') || path.includes('[')) return false;
-  return RESPONSE_COLLAPSED_FIELDS.has(path);
+  if (!path || path.includes('.') || path.includes('[')) return '';
+  return path;
 }
 
 function isJsonActionHidden(nodeKey) {
-  return nodeKey.includes(':response:$.') && nodeKey.includes('.$value');
+  return (nodeKey.includes(':response:$.') || nodeKey.includes(':request:$.')) && nodeKey.includes('.$value');
 }
 
 function jsonObjectMeta(value) {
@@ -1002,7 +1040,7 @@ function jsonArrayMeta(value, nodeKey) {
     counts.set(label, (counts.get(label) || 0) + 1);
   }
   const entries = [...counts.entries()]
-    .sort((left, right) => right[1] - left[1])
+    .sort((left, right) => right[1] - left[1]);
   const visible = [];
   if (isRequestInputArray(nodeKey)) {
     for (const label of ['developer', 'system']) {
@@ -1025,6 +1063,28 @@ function isRequestInputArray(nodeKey) {
 
 function isJsonNodeOpen(nodeKey, depth) {
   return openJsonNodeKeys.has(nodeKey) || (depth <= 1 && !openJsonNodeKeys.has(`${nodeKey}:closed`));
+}
+
+function toggleCollapsedJsonValue(exchangeDetails, exchangeId, nodeKey) {
+  if (!nodeKey) return;
+  const isOpen = openJsonNodeKeys.has(nodeKey) && !openJsonNodeKeys.has(`${nodeKey}:closed`);
+  if (isOpen) {
+    openJsonNodeKeys.delete(nodeKey);
+    openJsonNodeKeys.add(`${nodeKey}:closed`);
+  } else {
+    openJsonNodeKeys.add(nodeKey);
+    openJsonNodeKeys.delete(`${nodeKey}:closed`);
+  }
+  rerenderExchangeDetail(exchangeDetails, exchangeId);
+}
+
+function rerenderExchangeDetail(exchangeDetails, exchangeId) {
+  const root = exchangeDetails.querySelector('.exchange-detail');
+  const exchange = exchangeDetailCache.get(exchangeId);
+  if (!root || !exchange) return;
+  captureExchangeScrollPositions(exchangeDetails);
+  root.innerHTML = renderExchangeDetail(exchange, exchangeId);
+  wireExchangeDetail(exchangeDetails);
 }
 
 function setJsonSubtreeOpen(rootNode, rootKey, open) {
