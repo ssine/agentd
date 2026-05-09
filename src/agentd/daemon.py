@@ -30,6 +30,8 @@ from .title import normalize_title, title_from_text
 STATUS_TICK_SECONDS = 5
 STATUS_UPDATE_MIN_INTERVAL_SECONDS = 1
 FEISHU_SEND_MIN_INTERVAL_SECONDS = 1
+TERMINAL_STATUS_REPLAY_DELAY_SECONDS = 3
+TERMINAL_STATUS_PHASES = {'done', 'failed', 'stopped'}
 
 
 @dataclass
@@ -643,6 +645,7 @@ class AgentDaemon:
             )
             self._add_model_message(active, f'运行失败: {error_detail}', phase='error')
             self._publish_status(active, force=True, create=True)
+            self._schedule_terminal_status_replay(active.run_id)
             active.done.set()
             with self._active_lock:
                 self._active_runs.pop(session.id, None)
@@ -719,6 +722,7 @@ class AgentDaemon:
             )
         run = self.registry.get_run(active.run_id)
         self._publish_status(active, force=True, create=bool(run and run.status_message_id))
+        self._schedule_terminal_status_replay(active.run_id)
 
         try:
             self._queue_final_once(active, final_text)
@@ -882,6 +886,7 @@ class AgentDaemon:
                 finished_at=int(time.time()),
             )
             self._publish_status(active, force=True, create=True)
+            self._schedule_terminal_status_replay(active.run_id)
         elif event_type == 'turn_completed':
             status = str(event.get('status') or '')
             final_text = str(event.get('final_text') or '').strip()
@@ -907,6 +912,7 @@ class AgentDaemon:
                     finished_at=int(time.time()),
                 )
             self._publish_status(active, force=True, create=False)
+            self._schedule_terminal_status_replay(active.run_id)
         elif event_type == 'error':
             text = str(event.get('text') or '')
             if active.session.codex_thread_id and has_invalid_encrypted_content(text):
@@ -938,6 +944,7 @@ class AgentDaemon:
                 finished_at=int(time.time()),
             )
             self._publish_status(active, force=True, create=True)
+            self._schedule_terminal_status_replay(active.run_id)
 
     def _add_model_message(self, active: ActiveRun, text: str, *, phase: str) -> None:
         text = text.strip()
@@ -1004,13 +1011,26 @@ class AgentDaemon:
         self._reconcile_dirty_cards(run_id=active.run_id)
         self._drain_feishu_outbox()
 
-    def _publish_status_for_run(self, run_id: int, *, force: bool = False) -> None:
+    def _publish_status_for_run(self, run_id: int, *, force: bool = False, resend: bool = False) -> None:
         self.registry.mark_card_dirty(run_id)
         run = self.registry.get_run(run_id)
         if run is not None and not force and self._should_defer_status_publish(run):
             return
-        self._reconcile_dirty_cards(run_id=run_id)
+        self._reconcile_dirty_cards(run_id=run_id, resend=resend)
         self._drain_feishu_outbox()
+
+    def _schedule_terminal_status_replay(self, run_id: int) -> None:
+        def replay() -> None:
+            time.sleep(TERMINAL_STATUS_REPLAY_DELAY_SECONDS)
+            self._replay_terminal_status_card(run_id)
+
+        threading.Thread(target=replay, name=f'agentd-terminal-card-replay-{run_id}', daemon=True).start()
+
+    def _replay_terminal_status_card(self, run_id: int) -> None:
+        run = self.registry.get_run(run_id)
+        if run is None or run.status_phase not in TERMINAL_STATUS_PHASES:
+            return
+        self._publish_status_for_run(run_id, force=True, resend=True)
 
     def _should_defer_status_publish(self, run: RunRecord) -> bool:
         if run.status_phase != 'running':
@@ -1060,7 +1080,7 @@ class AgentDaemon:
             )
             self.registry.mark_card_dirty(run.id)
 
-    def _reconcile_dirty_cards(self, *, run_id: int | None = None, limit: int = 20) -> None:
+    def _reconcile_dirty_cards(self, *, run_id: int | None = None, limit: int = 20, resend: bool = False) -> None:
         runs = [self.registry.get_run(run_id)] if run_id is not None else self.registry.list_dirty_card_runs(limit)
         for run in runs:
             if run is None:
@@ -1082,6 +1102,7 @@ class AgentDaemon:
                 projection is not None
                 and remote_message_id
                 and str(projection['last_render_hash'] or '') == render_hash
+                and not resend
             ):
                 self.registry.mark_card_enqueued(run.id, render_hash=render_hash)
                 continue

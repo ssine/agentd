@@ -380,6 +380,46 @@ class DurableRunProjectionTest(unittest.TestCase):
             self.assertEqual(payload['message_id'], 'new-card')
             self.assertEqual(payload['card']['header']['template'], 'green')
 
+    def test_terminal_status_replay_resends_same_render_hash(self) -> None:
+        class FakeFeishu:
+            def __init__(self) -> None:
+                self.updated: list[tuple[str, dict[str, object]]] = []
+
+            def update_interactive(self, message_id: str, card: dict[str, object]) -> dict[str, object]:
+                self.updated.append((message_id, card))
+                return {'data': {'message_id': message_id}}
+
+        with tempfile.TemporaryDirectory() as raw_dir:
+            root = Path(raw_dir)
+            config = make_config(root)
+            daemon = AgentDaemon(config, dry_send=False)
+            fake = FakeFeishu()
+            daemon.feishu = fake  # type: ignore[assignment]
+            session = daemon.registry.get_main_session('chat-1', str(root))
+            run = daemon.registry.create_run(
+                session_id=session.id,
+                source_message_id='msg-1',
+                prompt='hello',
+                host='host-a',
+                subject='Codex',
+                display_title='Durable run',
+                status_message_id='card-1',
+            )
+            daemon.registry.update_run_and_mark_card_dirty(
+                run.id,
+                state='succeeded',
+                status_phase='done',
+                status='完成',
+                finished_at=int(time.time()),
+            )
+
+            daemon._publish_status_for_run(run.id, force=True)
+            daemon._last_feishu_send_at = 0
+            daemon._replay_terminal_status_card(run.id)
+
+            self.assertEqual([call[0] for call in fake.updated], ['card-1', 'card-1'])
+            self.assertEqual(fake.updated[-1][1]['header']['template'], 'green')
+
     def test_spawned_child_uses_thread_intro_message_as_status_card(self) -> None:
         with tempfile.TemporaryDirectory() as raw_dir:
             root = Path(raw_dir)
