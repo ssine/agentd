@@ -9,10 +9,12 @@ from agentd.models import AgentSession, RunRecord, SpawnRequest
 
 class FakeFeishu:
     def __init__(self) -> None:
+        self.calls: list[tuple[str, str]] = []
         self.interactive_replies: list[dict[str, object]] = []
         self.interactive_sends: list[dict[str, object]] = []
 
     def send_interactive(self, chat_id: str, card: dict[str, object]) -> dict[str, object]:
+        self.calls.append(('send_interactive', chat_id))
         self.interactive_sends.append(
             {
                 'chat_id': chat_id,
@@ -28,6 +30,7 @@ class FakeFeishu:
         *,
         reply_in_thread: bool = False,
     ) -> dict[str, object]:
+        self.calls.append(('reply_interactive', message_id))
         self.interactive_replies.append(
             {
                 'message_id': message_id,
@@ -35,6 +38,8 @@ class FakeFeishu:
                 'reply_in_thread': reply_in_thread,
             }
         )
+        if message_id == 'message-branch':
+            return {'data': {'thread_id': 'message-branch', 'message_id': 'message-branch-reply'}}
         return {'data': {'thread_id': 'thread-child', 'message_id': 'message-child'}}
 
 
@@ -166,7 +171,7 @@ class DaemonStatusCardTest(unittest.TestCase):
         content = card['elements'][0]['text']['content']
         self.assertIn('<at id=ou_sender></at>', content)
 
-    def test_branch_thread_starts_from_top_level_chat_card(self) -> None:
+    def test_branch_thread_starts_from_top_level_chat_card_and_replies_intro(self) -> None:
         daemon = object.__new__(AgentDaemon)
         daemon.dry_send = False
         fake_feishu = FakeFeishu()
@@ -224,7 +229,10 @@ class DaemonStatusCardTest(unittest.TestCase):
 
         self.assertEqual(thread_id, 'message-branch')
         self.assertEqual(message_id, 'message-branch')
-        self.assertEqual(fake_feishu.interactive_replies, [])
+        self.assertEqual(
+            fake_feishu.calls,
+            [('send_interactive', 'chat'), ('reply_interactive', 'message-branch')],
+        )
         self.assertEqual(fake_feishu.interactive_sends[0]['chat_id'], 'chat')
         card = fake_feishu.interactive_sends[0]['card']
         self.assertIsInstance(card, dict)
@@ -233,6 +241,15 @@ class DaemonStatusCardTest(unittest.TestCase):
         content = card['elements'][0]['text']['content']
         self.assertIn('<at id=ou_sender></at>', content)
         self.assertIn('并行子任务已启动', content)
+        reply = fake_feishu.interactive_replies[0]
+        self.assertEqual(reply['message_id'], 'message-branch')
+        self.assertEqual(reply['reply_in_thread'], True)
+        reply_card = reply['card']
+        self.assertIsInstance(reply_card, dict)
+        assert isinstance(reply_card, dict)
+        reply_content = reply_card['elements'][0]['text']['content']
+        self.assertIn('<at id=ou_sender></at>', reply_content)
+        self.assertIn('并行子任务已启动', reply_content)
 
 
 if __name__ == '__main__':

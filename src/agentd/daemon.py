@@ -408,20 +408,48 @@ class AgentDaemon:
         if self.dry_send:
             return f'dry-thread-{request.id}', f'dry-thread-message-{request.id}'
         sender_open_id = request.sender_open_id or parent.sender_open_id
-        card = self._build_child_intro_card(request, sender_open_id=sender_open_id, mode=mode)
         if mode == 'handoff':
-            result = self.feishu.reply_interactive(
-                parent.status_message_id,
-                card,
-                reply_in_thread=True,
+            return self._reply_child_intro_in_thread(
+                parent.status_message_id, request, sender_open_id=sender_open_id, mode=mode
             )
-        else:
-            result = self.feishu.send_interactive(request.chat_id, card)
+
+        card = self._build_child_intro_card(request, sender_open_id=sender_open_id, mode=mode)
+        result = self.feishu.send_interactive(request.chat_id, card)
         thread_id = thread_id_from_result(result)
         message_id = message_id_from_result(result)
+        source_message_id = message_id or thread_id or parent.status_message_id
         if not thread_id:
-            thread_id = message_id or parent.status_message_id
-        return thread_id, message_id or parent.status_message_id
+            thread_id = source_message_id
+        if mode == 'branch':
+            reply_thread_id, _ = self._reply_child_intro_in_thread(
+                source_message_id,
+                request,
+                sender_open_id=sender_open_id,
+                mode=mode,
+                fallback_thread_id=thread_id,
+            )
+            thread_id = reply_thread_id or thread_id
+        return thread_id, source_message_id
+
+    def _reply_child_intro_in_thread(
+        self,
+        message_id: str,
+        request: SpawnRequest,
+        *,
+        sender_open_id: str = '',
+        mode: str = 'handoff',
+        fallback_thread_id: str = '',
+    ) -> tuple[str, str]:
+        result = self.feishu.reply_interactive(
+            message_id,
+            self._build_child_intro_card(request, sender_open_id=sender_open_id, mode=mode),
+            reply_in_thread=True,
+        )
+        thread_id = thread_id_from_result(result)
+        reply_message_id = message_id_from_result(result)
+        if not thread_id:
+            thread_id = fallback_thread_id or reply_message_id or message_id
+        return thread_id, reply_message_id or message_id
 
     def _build_child_intro_card(
         self, request: SpawnRequest, *, sender_open_id: str = '', mode: str = 'handoff'
