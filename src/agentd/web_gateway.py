@@ -433,6 +433,24 @@ INDEX_HTML = r"""<!doctype html>
       list-style-position: outside;
       overflow-wrap: anywhere;
     }
+    .json-collapsed-value {
+      display: inline-block;
+      margin: 0;
+      vertical-align: top;
+    }
+    .json-collapsed-value > summary {
+      display: inline;
+      list-style: none;
+    }
+    .json-collapsed-value > summary::marker {
+      content: "";
+    }
+    .json-collapsed-value > summary::-webkit-details-marker {
+      display: none;
+    }
+    .json-collapsed-value > .json-children {
+      margin-top: 2px;
+    }
     .json-summary {
       display: inline-flex;
       align-items: center;
