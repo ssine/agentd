@@ -117,6 +117,7 @@ class SpawnRequest:
     skills: tuple[str, ...]
     state: str
     sender_open_id: str = ''
+    mode: str = 'handoff'
 
 
 @dataclass(frozen=True)

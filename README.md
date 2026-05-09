@@ -300,6 +300,13 @@ prompt_files = ["CONTEXT.md", "memory/MEMORY.md"]
 prompt_file_max_bytes = 65536
 ```
 
+Agentd has two child-thread creation modes:
+
+- `spawn-child`: hand off the current task. The parent turn is interrupted and the child thread takes over.
+- `spawn-branch`: start parallel work. The parent turn keeps running and the new child thread gets its own status card.
+
+Child sessions cannot create nested child threads because Feishu threads do not support child threads. Start separate work from the main chat instead.
+
 Child sessions can choose context explicitly:
 
 ```bash
@@ -309,6 +316,18 @@ printf %s "$child_task" | "$AGENTD_CLI" spawn-child \
   --profile personal \
   --skills bookkeeping,calendar
 ```
+
+For parallel work, use:
+
+```bash
+printf %s "$child_task" | "$AGENTD_CLI" spawn-branch \
+  --cwd /path/to/work \
+  --title "short title"
+```
+
+When a main-chat turn is already running, users can also send `/branch <task>`
+to start a parallel child task, or `/thread [title]` to create an empty Feishu
+thread that starts Codex when the first message is posted inside it.
 
 ## Service Management
 

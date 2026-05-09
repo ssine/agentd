@@ -52,16 +52,12 @@ def main(argv: list[str] | None = None) -> int:
     spawn_child = sub.add_parser(
         'spawn-child', help='request the running daemon to hand off into a child Feishu thread'
     )
-    spawn_child.add_argument('--cwd', required=True, help='working directory for the child Codex session')
-    spawn_child.add_argument('--title', default='', help='short label shown on the child task card')
-    spawn_child.add_argument('--prompt', default='', help='prompt for the child Codex; stdin is used when omitted')
-    spawn_child.add_argument('--profile', default='', help='context profile for the child Codex session')
-    spawn_child.add_argument('--skills', default='', help='comma-separated skill names to add for the child session')
-    spawn_child.add_argument('--parent-session-id', type=int, default=0)
-    spawn_child.add_argument('--parent-status-message-id', default='')
-    spawn_child.add_argument('--parent-source-message-id', default='')
-    spawn_child.add_argument('--sender-open-id', default='')
-    spawn_child.add_argument('--chat-id', default='')
+    add_spawn_request_arguments(spawn_child)
+
+    spawn_branch = sub.add_parser(
+        'spawn-branch', help='request the running daemon to start a parallel child Feishu thread'
+    )
+    add_spawn_request_arguments(spawn_branch)
 
     set_title = sub.add_parser('set-title', help='update the active Feishu status card title')
     set_title.add_argument('title', nargs='+', help=f'short title; capped to {TITLE_DISPLAY_WIDTH} display columns')
@@ -150,7 +146,9 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
     if args.command == 'spawn-child':
-        return spawn_child_request(config, args)
+        return spawn_request(config, args, mode='handoff')
+    if args.command == 'spawn-branch':
+        return spawn_request(config, args, mode='branch')
     if args.command == 'set-title':
         return set_title_request(config, args)
     parser.error('unreachable')
@@ -259,7 +257,25 @@ def config_check(config: AgentdConfig) -> int:
     return 0
 
 
-def spawn_child_request(config: AgentdConfig, args: argparse.Namespace) -> int:
+def add_spawn_request_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument('--cwd', required=True, help='working directory for the child Codex session')
+    parser.add_argument('--title', default='', help='short label shown on the child task card')
+    parser.add_argument('--prompt', default='', help='prompt for the child Codex; stdin is used when omitted')
+    parser.add_argument('--profile', default='', help='context profile for the child Codex session')
+    parser.add_argument('--skills', default='', help='comma-separated skill names to add for the child session')
+    parser.add_argument('--parent-session-id', type=int, default=0)
+    parser.add_argument('--parent-status-message-id', default='')
+    parser.add_argument('--parent-source-message-id', default='')
+    parser.add_argument('--sender-open-id', default='')
+    parser.add_argument('--chat-id', default='')
+
+
+def spawn_request(config: AgentdConfig, args: argparse.Namespace, *, mode: str) -> int:
+    session_kind = os.environ.get('AGENTD_SESSION_KIND') or ''
+    if session_kind == 'child':
+        print('nested child tasks are not supported; start separate work from the main Feishu chat', file=sys.stderr)
+        return 2
+
     parent_session_id = args.parent_session_id or int(os.environ.get('AGENTD_SESSION_ID') or 0)
     parent_status_message_id = args.parent_status_message_id or os.environ.get('AGENTD_STATUS_MESSAGE_ID') or ''
     parent_source_message_id = args.parent_source_message_id or os.environ.get('AGENTD_SOURCE_MESSAGE_ID') or ''
@@ -298,6 +314,7 @@ def spawn_child_request(config: AgentdConfig, args: argparse.Namespace) -> int:
         context_profile=str(args.profile or ''),
         skills=skills,
         sender_open_id=sender_open_id,
+        mode=mode,
     )
     print(f'spawn_request_id={request_id}')
     return 0

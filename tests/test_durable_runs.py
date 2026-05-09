@@ -436,6 +436,106 @@ class DurableRunProjectionTest(unittest.TestCase):
             self.assertEqual(child_run.source_message_id, 'dry-thread-message-1')
             self.assertEqual(child_run.status_message_id, 'dry-thread-message-1')
 
+    def test_spawn_branch_keeps_parent_running(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_dir:
+            root = Path(raw_dir)
+            daemon = AgentDaemon(make_config(root), dry_send=True)
+            parent_session = daemon.registry.get_main_session('chat-1', str(root))
+            parent_run = daemon.registry.create_run(
+                session_id=parent_session.id,
+                source_message_id='user-message',
+                prompt='do parent work',
+                host='host-a',
+                subject='Codex',
+                display_title='Parent run',
+                status_message_id='parent-card',
+            )
+            parent_active = ActiveRun(run_id=parent_run.id, session=parent_session, control=CodexRunControl())
+            with daemon._active_lock:
+                daemon._active_runs[parent_session.id] = parent_active
+            request = SpawnRequest(
+                id=2,
+                parent_session_id=parent_session.id,
+                parent_status_message_id='parent-card',
+                parent_source_message_id='user-message',
+                chat_id='chat-1',
+                cwd=str(root),
+                title='Parallel run',
+                prompt='do parallel work',
+                context_profile='',
+                skills=(),
+                state='claimed',
+                sender_open_id='ou_user',
+                mode='branch',
+            )
+
+            with (
+                patch.object(daemon, '_status_ticker', return_value=None),
+                patch.object(daemon, '_run_turn_worker', return_value=None),
+                redirect_stdout(StringIO()),
+            ):
+                daemon._handle_spawn_request(request)
+
+            parent_after = daemon.registry.get_run(parent_run.id)
+            self.assertIsNotNone(parent_after)
+            assert parent_after is not None
+            self.assertEqual(parent_after.state, 'running')
+            self.assertEqual(parent_after.status_phase, 'running')
+            self.assertFalse(parent_active.done.is_set())
+            self.assertIs(daemon._active_for(parent_session.id), parent_active)
+
+            child_sessions = [session for session in daemon.registry.list_sessions() if session.kind == 'child']
+            self.assertEqual(len(child_sessions), 1)
+            child_runs = daemon.registry.list_runs(session_id=child_sessions[0].id)
+            self.assertEqual(len(child_runs), 1)
+            self.assertEqual(child_runs[0].status_message_id, 'dry-thread-message-2')
+
+    def test_child_session_cannot_spawn_nested_child(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_dir:
+            root = Path(raw_dir)
+            daemon = AgentDaemon(make_config(root), dry_send=True)
+            child_session = daemon.registry.bind_child_session(
+                'chat-1', 'thread-1', str(root), root_message_id='card-1'
+            )
+            child_run = daemon.registry.create_run(
+                session_id=child_session.id,
+                source_message_id='card-1',
+                prompt='child work',
+                host='host-a',
+                subject='子任务',
+                display_title='Child run',
+                status_message_id='card-1',
+            )
+            child_active = ActiveRun(run_id=child_run.id, session=child_session, control=CodexRunControl())
+            with daemon._active_lock:
+                daemon._active_runs[child_session.id] = child_active
+            request = SpawnRequest(
+                id=3,
+                parent_session_id=child_session.id,
+                parent_status_message_id='card-1',
+                parent_source_message_id='card-1',
+                chat_id='chat-1',
+                cwd=str(root),
+                title='Nested run',
+                prompt='do nested work',
+                context_profile='',
+                skills=(),
+                state='claimed',
+                sender_open_id='ou_user',
+                mode='branch',
+            )
+
+            with redirect_stdout(StringIO()):
+                daemon._handle_spawn_request(request)
+
+            child_after = daemon.registry.get_run(child_run.id)
+            self.assertIsNotNone(child_after)
+            assert child_after is not None
+            self.assertEqual(child_after.status, '子任务内不支持再创建子任务')
+            self.assertEqual(
+                len([session for session in daemon.registry.list_sessions() if session.kind == 'child']), 1
+            )
+
     def test_feishu_outbox_send_slot_is_throttled(self) -> None:
         with tempfile.TemporaryDirectory() as raw_dir:
             root = Path(raw_dir)

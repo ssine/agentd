@@ -65,6 +65,7 @@ class Registry:
                     parent_status_message_id text not null,
                     parent_source_message_id text not null,
                     sender_open_id text not null default '',
+                    mode text not null default 'handoff',
                     chat_id text not null,
                     cwd text not null,
                     title text not null,
@@ -182,6 +183,7 @@ class Registry:
             self._add_column_if_missing(conn, 'sessions', 'skills', "text not null default ''")
             self._add_column_if_missing(conn, 'runs', 'sender_open_id', "text not null default ''")
             self._add_column_if_missing(conn, 'spawn_requests', 'sender_open_id', "text not null default ''")
+            self._add_column_if_missing(conn, 'spawn_requests', 'mode', "text not null default 'handoff'")
             self._add_column_if_missing(conn, 'spawn_requests', 'context_profile', "text not null default ''")
             self._add_column_if_missing(conn, 'spawn_requests', 'skills', "text not null default ''")
 
@@ -869,6 +871,7 @@ class Registry:
         context_profile: str = '',
         skills: tuple[str, ...] = (),
         sender_open_id: str = '',
+        mode: str = 'handoff',
     ) -> int:
         now = int(time.time())
         with self.connect() as conn:
@@ -879,6 +882,7 @@ class Registry:
                     parent_status_message_id,
                     parent_source_message_id,
                     sender_open_id,
+                    mode,
                     chat_id,
                     cwd,
                     title,
@@ -889,13 +893,14 @@ class Registry:
                     created_at,
                     updated_at
                 )
-                values(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+                values(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
                 """,
                 (
                     parent_session_id,
                     parent_status_message_id,
                     parent_source_message_id,
                     sender_open_id,
+                    mode,
                     chat_id,
                     cwd,
                     title,
@@ -1101,6 +1106,7 @@ class Registry:
             parent_status_message_id=str(row['parent_status_message_id']),
             parent_source_message_id=str(row['parent_source_message_id']),
             sender_open_id=str(row['sender_open_id'] or ''),
+            mode=str(row['mode'] or 'handoff'),
             chat_id=str(row['chat_id']),
             cwd=str(row['cwd']),
             title=str(row['title']),

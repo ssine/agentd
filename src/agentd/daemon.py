@@ -292,6 +292,10 @@ class AgentDaemon:
         if parent is None:
             self.registry.finish_spawn_request(request.id, state='failed', error='parent session is not active')
             return
+        mode = spawn_request_mode(request.mode)
+        if parent.session.kind == 'child':
+            self._reject_spawn_request(parent, request, '子任务内不支持再创建子任务')
+            return
         parent_run = self.registry.get_run(parent.run_id)
         if parent_run is None:
             self.registry.finish_spawn_request(request.id, state='failed', error='parent run is missing')
@@ -306,7 +310,7 @@ class AgentDaemon:
 
         sender_open_id = request.sender_open_id or parent_run.sender_open_id
         try:
-            thread_id, source_message_id = self._create_child_thread(parent_run, request)
+            thread_id, source_message_id = self._create_child_thread(parent_run, request, mode=mode)
             child_session = self.registry.bind_child_session(
                 request.chat_id,
                 thread_id,
@@ -316,21 +320,33 @@ class AgentDaemon:
                 context_profile=request.context_profile or self.config.context.default_child_profile,
                 skills=request.skills,
             )
-            parent.handoff_child_session_id = child_session.id
-            self.registry.update_run_and_mark_card_dirty(
-                parent.run_id,
-                handoff_child_session_id=child_session.id,
-                state='interrupted',
-                status='已移交子任务',
-                status_phase='stopped',
-                finished_at=int(time.time()),
-            )
-            self._add_model_message(parent, f'已移交子任务：{request.title or request.cwd}', phase='control')
-            self._publish_status(parent, force=True, create=True)
-            parent.control.interrupt()
-            parent.done.set()
-            with self._active_lock:
-                self._active_runs.pop(parent.session.id, None)
+            if mode == 'thread':
+                self.registry.update_run(parent.run_id, status='已创建新话题')
+                self._add_model_message(parent, f'已创建新话题：{request.title or request.cwd}', phase='control')
+                self._publish_status(parent, force=True, create=True)
+                self.registry.finish_spawn_request(request.id, state='started')
+                return
+
+            if mode == 'handoff':
+                parent.handoff_child_session_id = child_session.id
+                self.registry.update_run_and_mark_card_dirty(
+                    parent.run_id,
+                    handoff_child_session_id=child_session.id,
+                    state='interrupted',
+                    status='已移交子任务',
+                    status_phase='stopped',
+                    finished_at=int(time.time()),
+                )
+                self._add_model_message(parent, f'已移交子任务：{request.title or request.cwd}', phase='control')
+                self._publish_status(parent, force=True, create=True)
+                parent.control.interrupt()
+                parent.done.set()
+                with self._active_lock:
+                    self._active_runs.pop(parent.session.id, None)
+            else:
+                self.registry.update_run(parent.run_id, status='已创建并行子任务')
+                self._add_model_message(parent, f'已创建并行子任务：{request.title or request.cwd}', phase='control')
+                self._publish_status(parent, force=True, create=True)
 
             child_run = self.registry.create_run(
                 session_id=child_session.id,
@@ -366,24 +382,35 @@ class AgentDaemon:
             self.registry.finish_spawn_request(request.id, state='started')
         except Exception as exc:
             self.log.exception('failed to spawn child request %s', request.id)
-            self.registry.update_run_and_mark_card_dirty(
-                parent.run_id,
-                status=f'子任务启动失败: {exc}',
-                status_phase='failed',
-                state='failed',
-                finished_at=int(time.time()),
-            )
+            if mode == 'handoff':
+                self.registry.update_run_and_mark_card_dirty(
+                    parent.run_id,
+                    status=f'子任务启动失败: {exc}',
+                    status_phase='failed',
+                    state='failed',
+                    finished_at=int(time.time()),
+                )
+            else:
+                self.registry.update_run(parent.run_id, status=f'子任务启动失败: {exc}')
             self._add_model_message(parent, f'子任务启动失败: {exc}', phase='error')
             self._publish_status(parent, force=True, create=True)
             self.registry.finish_spawn_request(request.id, state='failed', error=str(exc))
 
-    def _create_child_thread(self, parent: RunRecord, request: SpawnRequest) -> tuple[str, str]:
+    def _reject_spawn_request(self, active: ActiveRun, request: SpawnRequest, reason: str) -> None:
+        self.registry.update_run(active.run_id, status=reason)
+        self._add_model_message(active, reason, phase='control')
+        self._publish_status(active, force=True, create=True)
+        self.registry.finish_spawn_request(request.id, state='failed', error=reason)
+
+    def _create_child_thread(
+        self, parent: RunRecord, request: SpawnRequest, *, mode: str = 'handoff'
+    ) -> tuple[str, str]:
         if self.dry_send:
             return f'dry-thread-{request.id}', f'dry-thread-message-{request.id}'
         sender_open_id = request.sender_open_id or parent.sender_open_id
         result = self.feishu.reply_interactive(
             parent.status_message_id,
-            self._build_child_intro_card(request, sender_open_id=sender_open_id),
+            self._build_child_intro_card(request, sender_open_id=sender_open_id, mode=mode),
             reply_in_thread=True,
         )
         thread_id = thread_id_from_result(result)
@@ -392,15 +419,26 @@ class AgentDaemon:
             thread_id = message_id or parent.status_message_id
         return thread_id, message_id or parent.status_message_id
 
-    def _build_child_intro_card(self, request: SpawnRequest, *, sender_open_id: str = '') -> dict[str, Any]:
+    def _build_child_intro_card(
+        self, request: SpawnRequest, *, sender_open_id: str = '', mode: str = 'handoff'
+    ) -> dict[str, Any]:
         title = normalize_title(request.title or request.cwd, fallback='子任务')
         mention = f'<at id={sender_open_id}></at> ' if sender_open_id else ''
+        if mode == 'thread':
+            leading = f'{mention}**新话题已创建**：{escape_lark_md(request.title or request.cwd)}'
+            tail = '在这个话题里回复第一条消息后，我会启动 Codex。'
+        elif mode == 'branch':
+            leading = f'{mention}**并行子任务已启动**：{escape_lark_md(request.title or request.cwd)}'
+            tail = '可以在这个话题里继续追加指令或打断，不会影响原任务。'
+        else:
+            leading = f'{mention}**子任务已启动**：{escape_lark_md(request.title or request.cwd)}'
+            tail = '可以在这个话题里继续追加指令或打断。'
         content = '\n'.join(
             [
-                f'{mention}**子任务已启动**：{escape_lark_md(request.title or request.cwd)}',
+                leading,
                 f'CWD: `{escape_lark_md(request.cwd)}`',
                 '',
-                '可以在这个话题里继续追加指令或打断。',
+                tail,
             ]
         )
         return {
@@ -440,6 +478,8 @@ class AgentDaemon:
         context_skills = session.skills
         prompt = self._build_prompt(message, session)
         reuse_root_card = session.kind == 'child' and message.message_id == session.root_message_id
+        if session.kind == 'child' and session.root_message_id and not reuse_root_card:
+            reuse_root_card = not self.registry.list_runs(session_id=session.id, limit=1)
         source_message_id = (
             session.root_message_id if reuse_root_card and session.root_message_id else message.message_id
         )
@@ -681,6 +721,10 @@ class AgentDaemon:
                 self._publish_status(active, force=True, create=True)
             return detail
 
+        branch_command = parse_live_branch_command(text)
+        if branch_command is not None:
+            return self._handle_live_branch_command(active, message, branch_command)
+
         ok, detail = active.control.steer(text)
         if ok:
             self.registry.update_run(active.run_id, status='已追加指令')
@@ -690,6 +734,47 @@ class AgentDaemon:
             self.registry.update_run(active.run_id, status=f'追加失败: {detail}')
             self._publish_status(active, force=True, create=True)
         return detail
+
+    def _handle_live_branch_command(self, active: ActiveRun, message: IncomingMessage, command: dict[str, str]) -> str:
+        if active.session.kind == 'child':
+            detail = '子任务内不支持再创建子任务；请回到主会话开启新的任务。'
+            self.registry.update_run(active.run_id, status=detail)
+            self._add_model_message(active, detail, phase='control')
+            self._publish_status(active, force=True, create=True)
+            return detail
+        run = self.registry.get_run(active.run_id)
+        if run is None:
+            return 'active run is missing'
+        if not run.status_message_id:
+            self._publish_status(active, force=True, create=True)
+            self._drain_feishu_outbox()
+            run = self.registry.get_run(active.run_id)
+        if run is None or not run.status_message_id:
+            return '当前任务还没有状态卡，无法创建新话题。'
+
+        mode = command['mode']
+        prompt = command['prompt']
+        if mode == 'branch' and not prompt:
+            return '请在 /branch 后面写新任务内容。'
+        title = normalize_title(command['title'] or title_from_text(prompt, fallback='新话题'), fallback='新话题')
+        request_id = self.registry.enqueue_spawn_request(
+            parent_session_id=active.session.id,
+            parent_status_message_id=run.status_message_id,
+            parent_source_message_id=run.source_message_id,
+            chat_id=message.chat_id,
+            cwd=active.session.cwd,
+            title=title,
+            prompt=prompt,
+            context_profile=run.context_profile,
+            skills=run.skills,
+            sender_open_id=message.sender_open_id or run.sender_open_id,
+            mode=mode,
+        )
+        status = '已请求创建新话题' if mode == 'thread' else '已请求创建并行子任务'
+        self.registry.update_run(active.run_id, status=status)
+        self._add_model_message(active, f'{status}：{title}', phase='control')
+        self._publish_status(active, force=True, create=True)
+        return f'{status}: {request_id}'
 
     def _handle_codex_event(self, active: ActiveRun, event: dict[str, Any]) -> None:
         if active.handoff_child_session_id is not None:
@@ -797,7 +882,9 @@ class AgentDaemon:
                 self.registry.update_run(active.run_id, codex_thread_id='')
                 self.log.info('cleared Codex thread for session %s after invalid encrypted content', active.session.id)
             if is_retryable_codex_error_event(event):
-                self.log.info('Codex reported retryable error for session %s: %s', active.session.id, compact(text, 300))
+                self.log.info(
+                    'Codex reported retryable error for session %s: %s', active.session.id, compact(text, 300)
+                )
                 self.registry.update_run_and_mark_card_dirty(
                     active.run_id,
                     state='running',
@@ -1422,16 +1509,36 @@ class AgentDaemon:
             '- For agentd service status, logs, health checks, start, stop, or restart, use `"$AGENTD_CLI" service ...`.',
             '- Agentd persists run, card, and final-reply state across restarts. Use `"$AGENTD_CLI" service restart --defer` when you want to avoid interrupting the current turn.',
             '- If you will handle substantial work in this session, set a concise task title once early with `"$AGENTD_CLI" set-title "<title>"`.',
-            '- If you delegate, do not call `set-title` in the parent session. Run `"$AGENTD_CLI" spawn-child --cwd <dir> --title <short title> [--profile <profile>] [--skills a,b]` with the full child task piped on stdin, then stop without sending a final answer.',
-            '- Example delegation command: `printf %s "$child_task" | "$AGENTD_CLI" spawn-child --cwd /path/to/work --title "short title" --skills bookkeeping,calendar`.',
-            '',
-            'Context policy:',
-            '- Treat the injected agentd context files below as persistent user-managed context.',
-            '- The current user request takes precedence over older context or memory if they conflict.',
-            '- MEMORY.md is injected as an index. For deeper prior work, preferences, decisions, dates, people, or todos, search memory files with `rg` first and load only relevant snippets.',
-            '- Only the injected skills are enabled in this Codex run. Read a SKILL.md only when its description clearly matches the task.',
-            '- To use another profile or skill set, delegate with `--profile <profile>` or `--skills a,b`.',
         ]
+        if active.session.kind == 'child':
+            lines.extend(
+                [
+                    '- This is already a Feishu child thread. Feishu does not support nested child threads.',
+                    '- Do not call `spawn-child` or `spawn-branch` from this session. If the user asks for separate work, tell them to start it from the main chat.',
+                ]
+            )
+        else:
+            lines.extend(
+                [
+                    '- Use `spawn-child` only for handoff: create a child thread, stop the current turn, and let the child take over the same work.',
+                    '- Use `spawn-branch` for parallel work: create a child thread without interrupting the current turn.',
+                    '- If live user input is unrelated to the current task or explicitly asks for a new task, use `spawn-branch` instead of steering this turn or handing off.',
+                    '- If you delegate or branch, do not call `set-title` in the parent session. Pipe the full child task to `"$AGENTD_CLI" spawn-child ...` or `"$AGENTD_CLI" spawn-branch ...`, then stop only for handoff.',
+                    '- Example handoff: `printf %s "$child_task" | "$AGENTD_CLI" spawn-child --cwd /path/to/work --title "short title" --skills bookkeeping,calendar`.',
+                    '- Example parallel branch: `printf %s "$child_task" | "$AGENTD_CLI" spawn-branch --cwd /path/to/work --title "short title"`.',
+                ]
+            )
+        lines.extend(
+            [
+                '',
+                'Context policy:',
+                '- Treat the injected agentd context files below as persistent user-managed context.',
+                '- The current user request takes precedence over older context or memory if they conflict.',
+                '- MEMORY.md is injected as an index. For deeper prior work, preferences, decisions, dates, people, or todos, search memory files with `rg` first and load only relevant snippets.',
+                '- Only the injected skills are enabled in this Codex run. Read a SKILL.md only when its description clearly matches the task.',
+                '- To use another profile or skill set, delegate with `--profile <profile>` or `--skills a,b`.',
+            ]
+        )
         if resolved.missing_skills:
             lines.append(f'- missing_skills: {", ".join(resolved.missing_skills)}')
         if resolved.prompt_files:
@@ -1488,6 +1595,23 @@ def thread_id_from_result(result: dict[str, Any]) -> str:
     data = result.get('data') if isinstance(result.get('data'), dict) else result
     value = data.get('thread_id') if isinstance(data, dict) else None
     return value if isinstance(value, str) else ''
+
+
+def spawn_request_mode(value: str) -> str:
+    mode = value.strip().lower()
+    return mode if mode in {'handoff', 'branch', 'thread'} else 'handoff'
+
+
+def parse_live_branch_command(text: str) -> dict[str, str] | None:
+    stripped = text.strip()
+    lowered = stripped.lower()
+    for command, mode in (('/branch', 'branch'), ('/thread', 'thread')):
+        if lowered == command or lowered.startswith(command + ' ') or lowered.startswith(command + '\n'):
+            body = stripped[len(command) :].strip()
+            if mode == 'thread':
+                return {'mode': mode, 'title': body, 'prompt': ''}
+            return {'mode': mode, 'title': '', 'prompt': body}
+    return None
 
 
 def is_web_run(run: RunRecord) -> bool:
