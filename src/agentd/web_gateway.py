@@ -564,7 +564,7 @@ function compact(value, limit = 1200) {
 function compactNumber(value) {
   const number = Number(value);
   if (!Number.isFinite(number)) return String(value ?? '');
-  if (Math.abs(number) <= 10000) return String(number);
+  if (Math.abs(number) < 10000) return String(number);
   const scaled = number / 1000;
   const text = scaled >= 100 ? scaled.toFixed(0) : scaled.toFixed(1);
   return `${text.replace(/\.0$/, '')}k`;
