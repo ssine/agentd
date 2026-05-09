@@ -897,7 +897,7 @@ function renderJsonObject(value, nodeKey, depth) {
 
 function renderJsonArray(value, nodeKey, depth) {
   const open = isJsonNodeOpen(nodeKey, depth);
-  const meta = jsonArrayMeta(value);
+  const meta = jsonArrayMeta(value, nodeKey);
   const count = `${value.length} items${meta ? ' · ' + meta : ''}`;
   return `<details class="json-node" data-json-node-key="${esc(nodeKey)}" ${open ? 'open' : ''}>
     <summary>${renderJsonNodeSummary('[]', count, nodeKey)}</summary>
@@ -993,7 +993,7 @@ function jsonObjectMeta(value) {
   return parts.slice(0, 4).join(' · ');
 }
 
-function jsonArrayMeta(value) {
+function jsonArrayMeta(value, nodeKey) {
   const counts = new Map();
   for (const item of value) {
     if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
@@ -1001,11 +1001,26 @@ function jsonArrayMeta(value) {
     if (!label) continue;
     counts.set(label, (counts.get(label) || 0) + 1);
   }
-  return [...counts.entries()]
+  const entries = [...counts.entries()]
     .sort((left, right) => right[1] - left[1])
-    .slice(0, 6)
+  const visible = [];
+  if (isRequestInputArray(nodeKey)) {
+    for (const label of ['developer', 'system']) {
+      if (counts.has(label)) visible.push([label, counts.get(label)]);
+    }
+  }
+  for (const entry of entries) {
+    if (visible.some(([label]) => label === entry[0])) continue;
+    if (visible.length >= 6) break;
+    visible.push(entry);
+  }
+  return visible
     .map(([label, count]) => `${label} ${count}`)
     .join(' · ');
+}
+
+function isRequestInputArray(nodeKey) {
+  return String(nodeKey || '').endsWith(':request:$.input');
 }
 
 function isJsonNodeOpen(nodeKey, depth) {
