@@ -304,6 +304,13 @@ INDEX_HTML = r"""<!doctype html>
       justify-content: space-between;
       gap: 10px;
     }
+    .header-actions {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 8px;
+      min-width: 0;
+    }
     h1, h2 { margin: 0; font-size: 14px; font-weight: 650; }
     .muted { color: var(--muted); }
     .scroll { overflow: auto; padding: 12px; }
@@ -331,7 +338,6 @@ INDEX_HTML = r"""<!doctype html>
     .run.active { border-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); }
     .run-title { font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .run-meta { margin-top: 4px; color: var(--muted); font-size: 12px; }
-    .run-copy { margin: 0 10px 10px; }
     .status-running { color: var(--accent); }
     .status-done { color: var(--ok); }
     .status-failed { color: var(--bad); }
@@ -514,7 +520,13 @@ INDEX_HTML = r"""<!doctype html>
     </div>
   </section>
   <section>
-    <header><h2>对话</h2><span id="runStatus" class="muted"></span></header>
+    <header>
+      <h2>对话</h2>
+      <div class="header-actions">
+        <button id="resumeCopy" class="copy" type="button" hidden>复制 resume</button>
+        <span id="runStatus" class="muted"></span>
+      </div>
+    </header>
     <div id="messages" class="scroll"></div>
     <form id="composer">
       <textarea id="text" placeholder="输入消息"></textarea>
@@ -595,13 +607,11 @@ function renderRuns(runs, activeId) {
     const cls = run.id === activeId ? 'run active' : 'run';
     const phase = `status-${esc(run.status_phase || '')}`;
     const title = esc(run.display_title || run.subject || `run ${run.id}`);
-    const command = run.codex_resume_command || '';
     return `<div class="${cls}">
       <button class="run-select" type="button" data-run-id="${run.id}">
         <div class="run-title">${title}</div>
         <div class="run-meta"><span class="${phase}">${esc(run.status_phase)}</span> · #${run.id} · ${esc(run.status)}</div>
       </button>
-      ${command ? `<button class="copy run-copy" type="button" data-copy="${esc(command)}">复制 resume</button>` : ''}
     </div>`;
   }).join('');
   root.querySelectorAll('.run-select[data-run-id]').forEach(button => {
@@ -610,12 +620,12 @@ function renderRuns(runs, activeId) {
       loadState();
     });
   });
-  wireCopyButtons(root);
 }
 
 function renderMessages(run, events) {
   const root = document.getElementById('messages');
   document.getElementById('runStatus').textContent = run ? `#${run.id} ${run.status}` : '';
+  renderResumeCopy(run);
   if (!run) {
     renderedMessagesRunId = null;
     root.innerHTML = '<div class="empty">暂无对话</div>';
@@ -625,13 +635,6 @@ function renderMessages(run, events) {
   const previousScrollTop = root.scrollTop;
   const shouldFollowBottom = runChanged || isScrolledToBottom(root);
   const blocks = [`<div class="message user"><div class="role">user</div><div class="content">${esc(run.prompt || '')}</div></div>`];
-  if (run.codex_resume_command) {
-    blocks.push(`<div class="event resume-command">
-      <div class="role">codex resume</div>
-      <button class="copy" type="button" data-copy="${esc(run.codex_resume_command)}">复制命令</button>
-      <code>${esc(run.codex_resume_command)}</code>
-    </div>`);
-  }
   for (const event of events) {
     const payload = event.payload || {};
     if (event.event_type === 'agent_message') {
@@ -649,8 +652,18 @@ function renderMessages(run, events) {
   root.scrollTop = shouldFollowBottom ? root.scrollHeight : previousScrollTop;
 }
 
+function renderResumeCopy(run) {
+  const button = document.getElementById('resumeCopy');
+  const command = run && run.codex_resume_command ? run.codex_resume_command : '';
+  button.hidden = !command;
+  button.dataset.copy = command;
+  wireCopyButtons(button.parentElement);
+}
+
 function wireCopyButtons(root) {
   root.querySelectorAll('button[data-copy]').forEach(button => {
+    if (button.dataset.copyWired === '1') return;
+    button.dataset.copyWired = '1';
     button.addEventListener('click', async () => {
       const text = button.dataset.copy || '';
       try {
@@ -760,7 +773,7 @@ function renderExchangeDetail(exchange, exchangeId) {
     </details>
     <details data-detail-section="response" ${isExchangeDetailSectionOpen(exchangeId, 'response', true) ? 'open' : ''}>
       <summary>response</summary>
-      ${renderJsonTree(compactResponseForDisplay(exchange.response_json ?? {}), exchangeId, 'response')}
+      ${renderJsonTree(exchange.response_json ?? {}, exchangeId, 'response')}
     </details>
   `;
 }
@@ -868,9 +881,24 @@ function renderJsonArray(value, nodeKey, depth) {
 }
 
 function renderJsonMember(label, value, nodeKey, depth) {
+  if (isCollapsedResponseField(nodeKey)) {
+    return `<div class="json-row">
+      <span class="json-key">${esc(label)}</span><span class="json-punctuation">: </span>${renderCollapsedJsonValue(value, nodeKey, depth)}
+    </div>`;
+  }
   return `<div class="json-row">
     <span class="json-key">${esc(label)}</span><span class="json-punctuation">: </span>${renderJsonValue(value, nodeKey, depth)}
   </div>`;
+}
+
+function renderCollapsedJsonValue(value, nodeKey, depth) {
+  const open = openJsonNodeKeys.has(nodeKey) && !openJsonNodeKeys.has(`${nodeKey}:closed`);
+  return `<details class="json-node" data-json-node-key="${esc(nodeKey)}" ${open ? 'open' : ''}>
+    <summary>${renderJsonNodeSummary('...', describeJsonValue(value), nodeKey)}</summary>
+    <div class="json-children">
+      ${renderJsonValue(value, `${nodeKey}.$value`, depth + 1)}
+    </div>
+  </details>`;
 }
 
 function renderJsonNodeSummary(shape, count, nodeKey) {
@@ -890,7 +918,7 @@ function renderJsonString(value) {
   return `<span class="json-string">${esc(JSON.stringify(value))}</span>`;
 }
 
-const RESPONSE_CONFIG_FIELDS = new Set([
+const RESPONSE_COLLAPSED_FIELDS = new Set([
   'instructions',
   'tools',
   'tool_choice',
@@ -916,32 +944,21 @@ const RESPONSE_CONFIG_FIELDS = new Set([
   'moderation'
 ]);
 
-function compactResponseForDisplay(value) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return value ?? {};
-  const result = {};
-  const primary = [
-    'id',
-    'object',
-    'created_at',
-    'completed_at',
-    'status',
-    'model',
-    'output',
-    'usage',
-    'error',
-    'incomplete_details',
-    'previous_response_id',
-    'tool_usage'
-  ];
-  primary.forEach(key => {
-    if (Object.prototype.hasOwnProperty.call(value, key)) result[key] = value[key];
-  });
-  Object.entries(value).forEach(([key, item]) => {
-    if (!Object.prototype.hasOwnProperty.call(result, key) && !RESPONSE_CONFIG_FIELDS.has(key)) {
-      result[key] = item;
-    }
-  });
-  return result;
+function isCollapsedResponseField(nodeKey) {
+  const marker = ':response:$.';
+  const markerIndex = nodeKey.indexOf(marker);
+  if (markerIndex < 0) return false;
+  const path = nodeKey.slice(markerIndex + marker.length);
+  if (!path || path.includes('.') || path.includes('[')) return false;
+  return RESPONSE_COLLAPSED_FIELDS.has(path);
+}
+
+function describeJsonValue(value) {
+  if (Array.isArray(value)) return `${value.length} items`;
+  if (value && typeof value === 'object') return `${Object.keys(value).length} keys`;
+  if (typeof value === 'string') return value.includes('\n') ? `${value.split('\n').length} lines` : `${value.length} chars`;
+  if (value === null) return 'null';
+  return String(value);
 }
 
 function jsonObjectMeta(value) {

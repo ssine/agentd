@@ -204,20 +204,31 @@ def parse_response_body(raw: bytes) -> dict[str, Any]:
     usage: dict[str, Any] = {}
     completed_text = ''
     completed_response: dict[str, Any] | None = None
+    output_items: list[dict[str, Any]] = []
     payloads = iter_sse_payloads(raw)
     for payload in payloads:
         event_type = str(payload.get('type') or '')
         delta = payload.get('delta')
         if isinstance(delta, str) and 'output_text.delta' in event_type:
             text_parts.append(delta)
+        if event_type == 'response.output_item.done' and isinstance(payload.get('item'), dict):
+            output_items.append(payload['item'])
         response = payload.get('response') if isinstance(payload.get('response'), dict) else None
         if response:
             completed_response = response
             completed_text = extract_response_text(response) or completed_text
             usage = normalize_usage(find_usage(response)) or usage
         usage = normalize_usage(find_usage(payload)) or usage
-    text = completed_text or ''.join(text_parts)
-    response_json: dict[str, Any] | None = completed_response or ({'events': payloads} if payloads else None)
+    response_json: dict[str, Any] | None = None
+    if completed_response:
+        response_json = dict(completed_response)
+        if not response_json.get('output') and output_items:
+            response_json['output'] = output_items
+    elif output_items:
+        response_json = {'output': output_items, 'events': payloads}
+    elif payloads:
+        response_json = {'events': payloads}
+    text = completed_text or extract_response_text({'output': output_items}) or ''.join(text_parts)
     return {'json': response_json, 'text': text, 'usage': usage}
 
 

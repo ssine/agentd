@@ -131,6 +131,27 @@ class WebTraceTest(unittest.TestCase):
             self.assertEqual(detail['codex_turn_id'], 'turn-zstd')
             self.assertEqual(detail['request_input_items'][1]['content'], 'compressed hello')
 
+    def test_exchange_detail_fills_stream_response_output_items(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_dir:
+            root = Path(raw_dir)
+            registry = Registry(root / 'agentd.sqlite')
+            session = registry.get_main_session('web', str(root))
+            request_path, response_path = write_stream_response_exchange_files(root)
+            insert_exchange(
+                registry,
+                session_id=session.id,
+                turn_id='turn-stream',
+                request_path=request_path,
+                response_path=response_path,
+            )
+
+            row = registry.list_model_http_exchanges(session_id=session.id)[0]
+            detail = exchange_detail(load_exchange(row))
+
+            self.assertEqual(detail['response_text'], 'stream hi')
+            self.assertEqual(detail['response_json']['output'][0]['role'], 'assistant')
+            self.assertEqual(detail['response_json']['output'][0]['content'][0]['text'], 'stream hi')
+
     def test_exchange_detail_uses_non_empty_content_for_function_calls(self) -> None:
         with tempfile.TemporaryDirectory() as raw_dir:
             root = Path(raw_dir)
@@ -206,6 +227,43 @@ def write_exchange_files(
     )
     response_path.write_bytes(
         b'HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n' + f'data: {json.dumps(completed)}\n\n'.encode()
+    )
+    return request_path, response_path
+
+
+def write_stream_response_exchange_files(root: Path) -> tuple[Path, Path]:
+    capture_dir = root / 'captures' / 'responses' / '2026-W19'
+    capture_dir.mkdir(parents=True, exist_ok=True)
+    request_path = capture_dir / 'stream-request.http'
+    response_path = capture_dir / 'stream-response.http'
+    request_path.write_bytes(
+        b'POST /v1/responses HTTP/1.1\r\nContent-Type: application/json\r\n\r\n'
+        + json.dumps({'model': 'gpt-test', 'input': 'hello'}).encode('utf-8')
+    )
+    item = {
+        'id': 'msg-stream',
+        'type': 'message',
+        'role': 'assistant',
+        'status': 'completed',
+        'content': [{'type': 'output_text', 'text': 'stream hi'}],
+    }
+    completed = {
+        'type': 'response.completed',
+        'response': {
+            'id': 'resp-stream',
+            'object': 'response',
+            'status': 'completed',
+            'output': [],
+            'usage': {'input_tokens': 1, 'output_tokens': 2, 'total_tokens': 3},
+        },
+    }
+    chunks = [
+        {'type': 'response.output_item.done', 'item': item},
+        completed,
+    ]
+    response_path.write_bytes(
+        b'HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n'
+        + b''.join(f'data: {json.dumps(chunk)}\n\n'.encode('utf-8') for chunk in chunks)
     )
     return request_path, response_path
 
