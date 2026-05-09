@@ -35,6 +35,11 @@ class WebConfig:
 
 
 @dataclass(frozen=True)
+class RunnerConfig:
+    kind: str = 'codex'
+
+
+@dataclass(frozen=True)
 class CodexCaptureConfig:
     enabled: bool = False
     upstream_mode: str = 'codex-default'
@@ -77,6 +82,16 @@ class CodexConfig:
 
 
 @dataclass(frozen=True)
+class ClaudeCodeConfig:
+    command: str = 'aclaude'
+    model: str = 'sonnet'
+    permission_mode: str = 'bypassPermissions'
+    use_login_shell: bool = True
+    turn_timeout_seconds: int = 1800
+    extra_args: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class AgentdConfig:
     config_path: Path
     home_dir: Path
@@ -90,6 +105,8 @@ class AgentdConfig:
     feishu: FeishuConfig
     web: WebConfig
     codex: CodexConfig
+    runner: RunnerConfig = field(default_factory=RunnerConfig)
+    claude: ClaudeCodeConfig = field(default_factory=ClaudeCodeConfig)
 
     @property
     def runtime_dir(self) -> Path:
@@ -189,6 +206,26 @@ def _command(value: Any, base: Path) -> str:
     return shlex.join(parts)
 
 
+def _string_tuple(value: Any) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        return tuple(shlex.split(value))
+    if isinstance(value, (list, tuple)):
+        return tuple(str(item) for item in value)
+    return (str(value),)
+
+
+def _runner_kind(value: Any) -> str:
+    kind = str(value or 'codex').strip().lower().replace('-', '_')
+    aliases = {
+        'claude': 'claude_code',
+        'claude-code': 'claude_code',
+        'claudecode': 'claude_code',
+    }
+    return aliases.get(kind, kind)
+
+
 def load_config(path: str | Path | None = None) -> AgentdConfig:
     raw_config_path = path or os.environ.get('AGENTD_CONFIG')
     config_path = Path(raw_config_path).expanduser() if raw_config_path else default_config_path()
@@ -200,7 +237,11 @@ def load_config(path: str | Path | None = None) -> AgentdConfig:
     context_raw = raw.get('context') if isinstance(raw.get('context'), dict) else {}
     feishu_raw = raw.get('feishu') if isinstance(raw.get('feishu'), dict) else {}
     web_raw = raw.get('web') if isinstance(raw.get('web'), dict) else {}
+    runner_raw = raw.get('runner') if isinstance(raw.get('runner'), dict) else {}
     codex_raw = raw.get('codex') if isinstance(raw.get('codex'), dict) else {}
+    claude_raw = raw.get('claude') if isinstance(raw.get('claude'), dict) else {}
+    if not claude_raw:
+        claude_raw = raw.get('claude_code') if isinstance(raw.get('claude_code'), dict) else {}
     codex_capture_raw = codex_raw.get('capture') if isinstance(codex_raw.get('capture'), dict) else {}
     codex_otel_raw = codex_raw.get('otel') if isinstance(codex_raw.get('otel'), dict) else {}
 
@@ -309,6 +350,15 @@ def load_config(path: str | Path | None = None) -> AgentdConfig:
             zstd_level=_zstd_level(codex_otel_raw.get('zstd_level') or capture_zstd_level),
         ),
     )
+    claude = ClaudeCodeConfig(
+        command=_command(claude_raw.get('command') or 'aclaude', source_dir),
+        model=str(claude_raw.get('model') or 'sonnet'),
+        permission_mode=str(claude_raw.get('permission_mode') or 'bypassPermissions'),
+        use_login_shell=bool(claude_raw.get('use_login_shell', True)),
+        turn_timeout_seconds=int(claude_raw.get('turn_timeout_seconds') or codex.turn_timeout_seconds),
+        extra_args=_string_tuple(claude_raw.get('extra_args')),
+    )
+    runner = RunnerConfig(kind=_runner_kind(runner_raw.get('kind') or agentd_raw.get('runner') or 'codex'))
 
     return AgentdConfig(
         config_path=config_path,
@@ -323,4 +373,6 @@ def load_config(path: str | Path | None = None) -> AgentdConfig:
         feishu=feishu,
         web=web,
         codex=codex,
+        runner=runner,
+        claude=claude,
     )

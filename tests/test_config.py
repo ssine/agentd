@@ -118,6 +118,7 @@ class ConfigTest(unittest.TestCase):
 
             self.assertEqual(config.home_dir, home)
             self.assertEqual(config.source_dir, source_dir)
+            self.assertEqual(config.claude.model, 'sonnet')
             self.assertEqual(config.workspace, workspace)
             self.assertEqual(config.state_dir, home / 'state')
             self.assertEqual(config.runtime_dir, home / 'state')
@@ -278,6 +279,48 @@ class ConfigTest(unittest.TestCase):
             self.assertEqual(config.codex.otel.archive_period, 'day')
             self.assertEqual(config.codex.otel.archive_format, 'tar.zst')
             self.assertEqual(config.codex.otel.zstd_level, 9)
+
+    def test_runner_and_claude_code_config(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_dir:
+            root = Path(raw_dir)
+            home = root / '.agentd'
+            source_dir = root / 'agentd-src'
+            workspace = root / 'workspace'
+            home.mkdir()
+            source_dir.mkdir()
+            workspace.mkdir()
+            config_path = home / 'agentd.toml'
+            config_path.write_text(
+                '\n'.join(
+                    [
+                        '[agentd]',
+                        f'source_dir = "{source_dir}"',
+                        f'workspace = "{workspace}"',
+                        '',
+                        '[runner]',
+                        'kind = "claude"',
+                        '',
+                        '[claude]',
+                        'command = "aclaude"',
+                        'model = "sonnet"',
+                        'permission_mode = "bypassPermissions"',
+                        'use_login_shell = true',
+                        'turn_timeout_seconds = 120',
+                        'extra_args = ["--max-budget-usd", "1"]',
+                        '',
+                    ]
+                ),
+                encoding='utf-8',
+            )
+
+            config = load_config(config_path)
+
+            self.assertEqual(config.runner.kind, 'claude_code')
+            self.assertEqual(config.claude.command, 'aclaude')
+            self.assertEqual(config.claude.model, 'sonnet')
+            self.assertTrue(config.claude.use_login_shell)
+            self.assertEqual(config.claude.turn_timeout_seconds, 120)
+            self.assertEqual(config.claude.extra_args, ('--max-budget-usd', '1'))
 
 
 if __name__ == '__main__':

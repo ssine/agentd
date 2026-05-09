@@ -14,6 +14,7 @@ class IncomingMessage:
     sender_type: str = ''
     thread_id: str = ''
     chat_type: str = ''
+    channel: str = 'feishu'
 
 
 @dataclass(frozen=True)
@@ -35,6 +36,12 @@ class AgentSession:
     cwd: str
     context_profile: str = ''
     skills: tuple[str, ...] = ()
+    runner_kind: str = ''
+    runner_session_ref: str | None = None
+
+    @property
+    def agent_session_ref(self) -> str:
+        return self.runner_session_ref or self.codex_thread_id or ''
 
 
 @dataclass(frozen=True)
@@ -69,6 +76,17 @@ class RunRecord:
     created_at: int
     updated_at: int
     sender_open_id: str = ''
+    runner_kind: str = ''
+    runner_session_ref: str = ''
+    runner_turn_ref: str = ''
+
+    @property
+    def agent_session_ref(self) -> str:
+        return self.runner_session_ref or self.codex_thread_id
+
+    @property
+    def agent_turn_ref(self) -> str:
+        return self.runner_turn_ref or self.turn_id
 
 
 @dataclass(frozen=True)
@@ -89,6 +107,38 @@ class FeishuOutboxItem:
     payload: dict[str, Any]
     state: str
     attempts: int
+    last_error: str
+    created_at: int
+    updated_at: int
+    sent_at: int | None
+
+
+@dataclass(frozen=True)
+class ChannelBindingRecord:
+    id: int
+    session_id: int
+    channel: str
+    conversation_ref: str
+    thread_ref: str
+    root_message_ref: str
+    metadata: dict[str, Any]
+    created_at: int
+    updated_at: int
+
+
+@dataclass(frozen=True)
+class DeliveryRecord:
+    id: int
+    run_id: int | None
+    channel: str
+    destination_ref: str
+    thread_ref: str
+    kind: str
+    dedupe_key: str
+    payload: dict[str, Any]
+    state: str
+    attempts: int
+    external_ref: str
     last_error: str
     created_at: int
     updated_at: int
