@@ -17,6 +17,9 @@ from .config import AgentdConfig
 UNIT_NAME = 'agentd.service'
 SERVICE_LOG_NAME = 'agentd-service.log'
 DEFERRED_SERVICE_REQUEST_NAME = 'agentd-service-request.json'
+STARTUP_NOTICE_NAME = 'agentd-startup-notice.json'
+RESTARTING_NOTICE_TEXT = 'agentd 即将重启，重启期间消息收发会短暂中断。'
+STARTED_NOTICE_TEXT = 'agentd 已启动成功，正在监听 Feishu 消息。'
 
 
 @dataclass(frozen=True)
@@ -48,6 +51,11 @@ def service_command(config: AgentdConfig, args: Any) -> int:
                 defer_seconds,
                 timeout_seconds=int(args.timeout),
             )
+        notify_chat_id = service_notice_chat_id()
+        prepare_restart_notice(config, notify_chat_id)
+        selected = select_backend(backend)
+        if selected == 'systemd':
+            return subprocess.run(['systemctl', '--user', 'restart', UNIT_NAME], check=False).returncode
         stop_service(config, backend, timeout_seconds=int(args.timeout))
         return start_service(config, backend)
     if command == 'logs':
@@ -385,18 +393,19 @@ def defer_service_command(
     timeout_seconds: int = 10,
 ) -> int:
     selected = select_backend(backend)
+    notify_chat_id = service_notice_chat_id()
     if command == 'restart' and service_running(config, selected):
         if not daemon_can_consume_deferred_service_command(config, selected):
-            launch_service_command(
+            launch_idle_service_command(
                 config,
                 selected,
                 command,
-                delay_seconds=defer_seconds,
+                not_before=time.time() + defer_seconds,
                 timeout_seconds=timeout_seconds,
             )
             print(
-                f'scheduled agentd service restart in {defer_seconds:g}s; '
-                'running daemon is older than the idle-aware restart handler'
+                f'scheduled agentd service restart after active runs finish via external idle watcher, '
+                f'not before {defer_seconds:g}s'
             )
             return 0
         write_deferred_service_command(
@@ -407,6 +416,7 @@ def defer_service_command(
                 'not_before': time.time() + defer_seconds,
                 'timeout_seconds': timeout_seconds,
                 'created_at': time.time(),
+                'notify_chat_id': notify_chat_id,
             },
         )
         print(f'scheduled agentd service restart after active runs finish, not before {defer_seconds:g}s')
@@ -496,6 +506,62 @@ def clear_deferred_service_command(config: AgentdConfig) -> None:
     deferred_service_request_path(config).unlink(missing_ok=True)
 
 
+def startup_notice_path(config: AgentdConfig) -> Path:
+    return _state_dir(config) / STARTUP_NOTICE_NAME
+
+
+def write_startup_notice(config: AgentdConfig, payload: dict[str, Any]) -> None:
+    _state_dir(config).mkdir(parents=True, exist_ok=True)
+    path = startup_notice_path(config)
+    tmp = path.with_suffix('.tmp')
+    tmp.write_text(json.dumps(payload, ensure_ascii=False) + '\n', encoding='utf-8')
+    tmp.replace(path)
+
+
+def read_startup_notice(config: AgentdConfig) -> dict[str, Any] | None:
+    path = startup_notice_path(config)
+    try:
+        payload = json.loads(path.read_text(encoding='utf-8'))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def clear_startup_notice(config: AgentdConfig) -> None:
+    startup_notice_path(config).unlink(missing_ok=True)
+
+
+def service_notice_chat_id() -> str:
+    return os.environ.get('AGENTD_CHAT_ID', '').strip()
+
+
+def prepare_restart_notice(config: AgentdConfig, chat_id: str) -> None:
+    if not chat_id:
+        return
+    write_startup_notice(
+        config,
+        {
+            'chat_id': chat_id,
+            'text': STARTED_NOTICE_TEXT,
+            'created_at': time.time(),
+        },
+    )
+    send_service_notice(config, chat_id, RESTARTING_NOTICE_TEXT)
+
+
+def send_service_notice(config: AgentdConfig, chat_id: str, text: str) -> bool:
+    if not chat_id or not text:
+        return False
+    try:
+        from .feishu import FeishuApi
+
+        FeishuApi(config.feishu).send_text(chat_id, text)
+    except Exception as exc:
+        print(f'failed to send Feishu service notice: {exc}', file=sys.stderr)
+        return False
+    return True
+
+
 def launch_service_command(
     config: AgentdConfig,
     backend: str,
@@ -515,6 +581,72 @@ def launch_service_command(
         '-c',
         script,
         str(delay_seconds),
+        str(agentd_executable(config)),
+        '--config',
+        str(config.config_path),
+        'service',
+        command,
+        '--backend',
+        backend,
+    ]
+    if command in {'restart', 'stop'}:
+        args.extend(['--timeout', str(timeout_seconds)])
+    with service_log_path(config).open('a', encoding='utf-8') as log:
+        subprocess.Popen(
+            args,
+            cwd=config.workspace,
+            stdin=subprocess.DEVNULL,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            text=True,
+        )
+
+
+def launch_idle_service_command(
+    config: AgentdConfig,
+    backend: str,
+    command: str,
+    *,
+    not_before: float,
+    timeout_seconds: int = 10,
+) -> None:
+    config.log_dir.mkdir(parents=True, exist_ok=True)
+    script = (
+        'import subprocess, sys, time\n'
+        'from pathlib import Path\n'
+        'from agentd.registry import Registry\n'
+        'db_path = Path(sys.argv[1])\n'
+        'not_before = float(sys.argv[2])\n'
+        'poll_seconds = float(sys.argv[3])\n'
+        'idle_grace_seconds = float(sys.argv[4])\n'
+        'cmd = sys.argv[5:]\n'
+        'time.sleep(max(0, not_before - time.time()))\n'
+        'idle_since = None\n'
+        'while True:\n'
+        '    try:\n'
+        '        idle = Registry(db_path).idle_work_count() == 0\n'
+        '    except Exception as exc:\n'
+        '        print(f\"waiting for agentd idle failed: {exc}\", flush=True)\n'
+        '        idle = False\n'
+        '    now = time.time()\n'
+        '    if idle:\n'
+        '        idle_since = idle_since or now\n'
+        '        if now - idle_since >= idle_grace_seconds:\n'
+        '            break\n'
+        '    else:\n'
+        '        idle_since = None\n'
+        '    time.sleep(poll_seconds)\n'
+        'raise SystemExit(subprocess.call(cmd))\n'
+    )
+    args = [
+        sys.executable,
+        '-c',
+        script,
+        str(config.db_path),
+        str(not_before),
+        '1',
+        '3',
         str(agentd_executable(config)),
         '--config',
         str(config.config_path),

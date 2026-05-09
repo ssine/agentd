@@ -410,6 +410,21 @@ class Registry:
             ).fetchone()
         return int(row['count']) if row else 0
 
+    def idle_work_count(self) -> int:
+        active_states = ('queued', 'starting', 'running', 'cancel_requested', 'recovering')
+        placeholders = ','.join('?' for _ in active_states)
+        with self.connect() as conn:
+            row = conn.execute(
+                f"""
+                select
+                    (select count(*) from runs where state in ({placeholders})) +
+                    (select count(*) from feishu_outbox where state in ('pending', 'sending')) +
+                    (select count(*) from card_projections where dirty != 0) as count
+                """,
+                active_states,
+            ).fetchone()
+        return int(row['count']) if row else 0
+
     def get_run_for_status_card(self, message_id: str) -> RunRecord | None:
         if not message_id:
             return None
@@ -444,6 +459,12 @@ class Registry:
         return [self._run_from_row(row) for row in rows]
 
     def update_run(self, run_id: int, **fields: object) -> None:
+        self._update_run(run_id, fields, mark_card_dirty=False)
+
+    def update_run_and_mark_card_dirty(self, run_id: int, **fields: object) -> None:
+        self._update_run(run_id, fields, mark_card_dirty=True)
+
+    def _update_run(self, run_id: int, fields: dict[str, object], *, mark_card_dirty: bool) -> None:
         allowed = {
             'state',
             'status_phase',
@@ -470,6 +491,7 @@ class Registry:
         }
         if not fields:
             return
+        now = int(time.time())
         assignments: list[str] = []
         values: list[object] = []
         for key, value in fields.items():
@@ -478,7 +500,7 @@ class Registry:
             assignments.append(f'{key} = ?')
             values.append(self._db_value(value))
         assignments.append('updated_at = ?')
-        values.append(int(time.time()))
+        values.append(now)
         values.append(run_id)
         with self.connect() as conn:
             conn.execute(f'update runs set {", ".join(assignments)} where id = ?', values)
@@ -491,7 +513,18 @@ class Registry:
                         remote_message_id = excluded.remote_message_id,
                         updated_at = excluded.updated_at
                     """,
-                    (run_id, str(fields.get('status_message_id') or ''), int(time.time())),
+                    (run_id, str(fields.get('status_message_id') or ''), now),
+                )
+            if mark_card_dirty:
+                conn.execute(
+                    """
+                    insert into card_projections(run_id, dirty, updated_at)
+                    values(?, 1, ?)
+                    on conflict(run_id) do update set
+                        dirty = 1,
+                        updated_at = excluded.updated_at
+                    """,
+                    (run_id, now),
                 )
 
     def touch_run_lease(self, run_id: int, *, lease_seconds: int = 30) -> None:
@@ -704,6 +737,7 @@ class Registry:
                         kind = ?,
                         payload_json = ?,
                         state = 'pending',
+                        attempts = 0,
                         last_error = '',
                         updated_at = ?
                     where id = ?
@@ -759,6 +793,7 @@ class Registry:
                     """
                     update feishu_outbox
                     set state = 'sent',
+                        attempts = 0,
                         last_error = '',
                         sent_at = ?,
                         updated_at = ?

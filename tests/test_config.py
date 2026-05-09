@@ -26,6 +26,8 @@ class ConfigTest(unittest.TestCase):
                         '[context]',
                         'memory_dir = "memory"',
                         'skill_roots = ["skills"]',
+                        'prompt_files = ["CONTEXT.md", "memory/MEMORY.md"]',
+                        'prompt_file_max_bytes = 1234',
                         '',
                         '[profiles.default]',
                         'skills = []',
@@ -64,7 +66,42 @@ class ConfigTest(unittest.TestCase):
             self.assertEqual(config.context.path, context_dir / 'context.toml')
             self.assertEqual(config.context.memory_dir, context_dir / 'memory')
             self.assertEqual(config.context.skill_roots, (context_dir / 'skills',))
+            self.assertEqual(
+                config.context.prompt_files,
+                (context_dir / 'CONTEXT.md', context_dir / 'memory/MEMORY.md'),
+            )
+            self.assertEqual(config.context.prompt_file_max_bytes, 1234)
             self.assertEqual(config.schedules.path, context_dir / 'schedules.toml')
+
+    def test_workspace_defaults_to_context_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_dir:
+            root = Path(raw_dir)
+            home = root / '.agentd'
+            context_dir = root / 'agent-context'
+            source_dir = root / 'agentd-src'
+            home.mkdir()
+            context_dir.mkdir()
+            source_dir.mkdir()
+            config_path = home / 'agentd.toml'
+            config_path.write_text(
+                '\n'.join(
+                    [
+                        '[agentd]',
+                        f'source_dir = "{source_dir}"',
+                        '',
+                        '[context]',
+                        f'dir = "{context_dir}"',
+                        '',
+                    ]
+                ),
+                encoding='utf-8',
+            )
+
+            config = load_config(config_path)
+
+            self.assertEqual(config.workspace, context_dir)
+            self.assertEqual(config.source_dir, source_dir)
+            self.assertEqual(config.state_dir, home / 'state')
 
     def test_workspace_relative_context_paths(self) -> None:
         with tempfile.TemporaryDirectory() as raw_dir:

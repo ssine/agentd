@@ -217,7 +217,18 @@ def load_config(path: str | Path | None = None) -> AgentdConfig:
         else PROJECT_ROOT
     )
     executable = _as_path(agentd_raw.get('executable', '.venv/bin/agentd'), source_dir)
-    workspace = _as_path(agentd_raw.get('workspace', '.'), source_dir)
+    context_dir = _as_path(
+        context_raw.get('context_dir')
+        or context_raw.get('dir')
+        or agentd_raw.get('context_dir')
+        or default_context_dir(),
+        home_dir,
+    )
+    workspace = (
+        _as_path(agentd_raw.get('workspace'), source_dir)
+        if agentd_raw.get('workspace') is not None
+        else context_dir
+    )
 
     if agentd_raw.get('state_dir') is not None:
         state_dir = _as_path(agentd_raw.get('state_dir'), home_dir)
@@ -226,13 +237,6 @@ def load_config(path: str | Path | None = None) -> AgentdConfig:
     else:
         state_dir = home_dir / 'state'
 
-    context_dir = _as_path(
-        context_raw.get('context_dir')
-        or context_raw.get('dir')
-        or agentd_raw.get('context_dir')
-        or default_context_dir(),
-        home_dir,
-    )
     if agentd_raw.get('context_profiles') is not None:
         context_config_path = _as_path(agentd_raw.get('context_profiles'), workspace)
         context_base = workspace

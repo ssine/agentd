@@ -28,6 +28,11 @@ from .schedule import ScheduleJob, due_run_key
 from .title import normalize_title, title_from_text
 
 
+STATUS_TICK_SECONDS = 5
+STATUS_UPDATE_MIN_INTERVAL_SECONDS = 1
+FEISHU_SEND_MIN_INTERVAL_SECONDS = 1
+
+
 @dataclass
 class RunIteration:
     message: str = ''
@@ -69,6 +74,7 @@ class AgentDaemon:
         self._active_lock = threading.Lock()
         self._active_runs: dict[int, ActiveRun] = {}
         self._outbox_lock = threading.Lock()
+        self._last_feishu_send_at = 0.0
         self._spawn_watcher_started = False
         self._spawn_watcher_lock = threading.Lock()
         self._scheduler_started = False
@@ -81,6 +87,7 @@ class AgentDaemon:
         self._ensure_scheduler()
         self._ensure_web_gateway()
         self._recover_stale_runs()
+        self._send_startup_notice_if_needed()
         listener = FeishuListener(self.config.feishu)
         self.log.info('starting Feishu listener')
         listener.start(self.handle_message, self.handle_card_action)
@@ -133,6 +140,7 @@ class AgentDaemon:
         from .service import (
             clear_deferred_service_command,
             launch_service_command,
+            prepare_restart_notice,
             read_deferred_service_command,
         )
 
@@ -152,7 +160,7 @@ class AgentDaemon:
             return
         with self._active_lock:
             active_count = len(self._active_runs)
-        if active_count or self.registry.active_run_count():
+        if active_count or self.registry.idle_work_count():
             return
 
         clear_deferred_service_command(self.config)
@@ -161,8 +169,32 @@ class AgentDaemon:
         except (TypeError, ValueError):
             timeout_seconds = 10
         backend = str(request.get('backend') or 'auto')
+        notify_chat_id = str(request.get('notify_chat_id') or '')
+        if notify_chat_id:
+            self._wait_for_feishu_send_slot()
+            prepare_restart_notice(self.config, notify_chat_id)
+            self._last_feishu_send_at = time.monotonic()
         self.log.info('launching deferred service restart after daemon became idle')
         launch_service_command(self.config, backend, command, delay_seconds=0.2, timeout_seconds=timeout_seconds)
+
+    def _send_startup_notice_if_needed(self) -> None:
+        from .service import clear_startup_notice, read_startup_notice, send_service_notice
+
+        notice = read_startup_notice(self.config)
+        if not notice:
+            return
+        chat_id = str(notice.get('chat_id') or '').strip()
+        text = str(notice.get('text') or '').strip()
+        if not chat_id or not text:
+            clear_startup_notice(self.config)
+            return
+        if self.dry_send:
+            clear_startup_notice(self.config)
+            return
+        self._wait_for_feishu_send_slot()
+        if send_service_notice(self.config, chat_id, text):
+            self._last_feishu_send_at = time.monotonic()
+            clear_startup_notice(self.config)
 
     def _ensure_scheduler(self) -> None:
         if not any(job.enabled for job in self.config.schedules.jobs):
@@ -324,7 +356,7 @@ class AgentDaemon:
             self.registry.finish_spawn_request(request.id, state='started')
         except Exception as exc:
             self.log.exception('failed to spawn child request %s', request.id)
-            self.registry.update_run(
+            self.registry.update_run_and_mark_card_dirty(
                 parent.run_id,
                 status=f'子任务启动失败: {exc}',
                 status_phase='failed',
@@ -499,7 +531,7 @@ class AgentDaemon:
                 return
             self.log.exception('Codex run failed for session %s', session.id)
             error_detail = str(exc)
-            self.registry.update_run(
+            self.registry.update_run_and_mark_card_dirty(
                 active.run_id,
                 state='failed',
                 status=failure_status('运行失败', error_detail),
@@ -542,7 +574,7 @@ class AgentDaemon:
         if final_text and self._last_model_output(active.run_id) != final_text:
             self._add_model_message(active, final_text, phase='final_answer')
         if result.status == 'interrupted':
-            self.registry.update_run(
+            self.registry.update_run_and_mark_card_dirty(
                 active.run_id,
                 state='interrupted',
                 status='已停止',
@@ -550,7 +582,7 @@ class AgentDaemon:
                 finished_at=int(time.time()),
             )
         elif result.status in {'completed', 'success'}:
-            self.registry.update_run(
+            self.registry.update_run_and_mark_card_dirty(
                 active.run_id,
                 state='succeeded',
                 status='完成',
@@ -559,7 +591,7 @@ class AgentDaemon:
             )
         elif result.status in {'systemError', 'failed', 'error'}:
             error_detail = result.final_text
-            self.registry.update_run(
+            self.registry.update_run_and_mark_card_dirty(
                 active.run_id,
                 state='failed',
                 status=codex_failure_status(result.status, error_detail),
@@ -568,7 +600,7 @@ class AgentDaemon:
                 finished_at=int(time.time()),
             )
         elif result.status not in {'', 'unknown'}:
-            self.registry.update_run(
+            self.registry.update_run_and_mark_card_dirty(
                 active.run_id,
                 state='succeeded',
                 status=f'完成: {result.status}',
@@ -576,7 +608,7 @@ class AgentDaemon:
                 finished_at=int(time.time()),
             )
         else:
-            self.registry.update_run(
+            self.registry.update_run_and_mark_card_dirty(
                 active.run_id,
                 state='succeeded',
                 status='完成',
@@ -598,7 +630,7 @@ class AgentDaemon:
             return self._active_runs.get(session_id)
 
     def _status_ticker(self, active: ActiveRun) -> None:
-        while not active.done.wait(5):
+        while not active.done.wait(STATUS_TICK_SECONDS):
             self.registry.touch_run_lease(active.run_id)
             self._publish_status(active, force=True, create=True)
 
@@ -695,7 +727,7 @@ class AgentDaemon:
             self._finish_tool(active, str(event.get('item_id') or ''))
             self._publish_status(active)
         elif event_type == 'turn_interrupted':
-            self.registry.update_run(
+            self.registry.update_run_and_mark_card_dirty(
                 active.run_id,
                 state='interrupted',
                 status='已停止',
@@ -711,7 +743,7 @@ class AgentDaemon:
             if final_text:
                 self._queue_final_once(active, final_text)
             if status in {'systemError', 'failed', 'error'}:
-                self.registry.update_run(
+                self.registry.update_run_and_mark_card_dirty(
                     active.run_id,
                     state='failed',
                     status=codex_failure_status(status, final_text),
@@ -720,7 +752,7 @@ class AgentDaemon:
                     finished_at=int(time.time()),
                 )
             else:
-                self.registry.update_run(
+                self.registry.update_run_and_mark_card_dirty(
                     active.run_id,
                     state='succeeded',
                     status=f'完成: {status}',
@@ -736,7 +768,7 @@ class AgentDaemon:
                 self.log.info('cleared Codex thread for session %s after invalid encrypted content', active.session.id)
             if text and self._last_model_output(active.run_id) != text:
                 self._add_model_message(active, text, phase='error')
-            self.registry.update_run(
+            self.registry.update_run_and_mark_card_dirty(
                 active.run_id,
                 state='failed',
                 status=failure_status('Codex error', text),
@@ -806,13 +838,31 @@ class AgentDaemon:
         if not create and not run.status_message_id:
             return
         self.registry.mark_card_dirty(active.run_id)
+        if not force and self._should_defer_status_publish(run):
+            return
         self._reconcile_dirty_cards(run_id=active.run_id)
         self._drain_feishu_outbox()
 
     def _publish_status_for_run(self, run_id: int, *, force: bool = False) -> None:
         self.registry.mark_card_dirty(run_id)
+        run = self.registry.get_run(run_id)
+        if run is not None and not force and self._should_defer_status_publish(run):
+            return
         self._reconcile_dirty_cards(run_id=run_id)
         self._drain_feishu_outbox()
+
+    def _should_defer_status_publish(self, run: RunRecord) -> bool:
+        if run.status_phase != 'running':
+            return False
+        projection = self.registry.get_card_projection(run.id)
+        remote_message_id = run.status_message_id
+        last_rendered_at = 0
+        if projection is not None:
+            remote_message_id = remote_message_id or str(projection['remote_message_id'] or '')
+            last_rendered_at = int(projection['last_rendered_at'] or 0)
+        if not remote_message_id or not last_rendered_at:
+            return False
+        return int(time.time()) - last_rendered_at < STATUS_UPDATE_MIN_INTERVAL_SECONDS
 
     def _recover_stale_runs(self) -> None:
         now = int(time.time())
@@ -821,7 +871,17 @@ class AgentDaemon:
         for run in self.registry.list_stale_active_runs(now=now):
             if run.session_id in active_session_ids:
                 continue
-            self.registry.update_run(
+            if run.final_message_text and run.final_message_sent_at is not None:
+                self.registry.update_run_and_mark_card_dirty(
+                    run.id,
+                    state='succeeded',
+                    status='完成',
+                    status_phase='done',
+                    error='',
+                    finished_at=now,
+                )
+                continue
+            self.registry.update_run_and_mark_card_dirty(
                 run.id,
                 state='interrupted',
                 status='agentd 重启后检测到运行中 turn 已失去控制',
@@ -893,6 +953,7 @@ class AgentDaemon:
             return
         try:
             for item in self.registry.claim_pending_outbox(limit):
+                self._wait_for_feishu_send_slot()
                 try:
                     remote_message_id = self._send_feishu_outbox_item(item)
                     if item.kind == 'status_card' and item.run_id is not None:
@@ -909,8 +970,17 @@ class AgentDaemon:
                     if item.kind == 'status_card' and item.run_id is not None:
                         self.registry.mark_card_error(item.run_id, str(exc))
                     self.registry.finish_outbox(item.id, sent=False, error=str(exc))
+                finally:
+                    self._last_feishu_send_at = time.monotonic()
         finally:
             self._outbox_lock.release()
+
+    def _wait_for_feishu_send_slot(self) -> None:
+        if self.dry_send:
+            return
+        wait_seconds = self._last_feishu_send_at + FEISHU_SEND_MIN_INTERVAL_SECONDS - time.monotonic()
+        if wait_seconds > 0:
+            time.sleep(wait_seconds)
 
     def _send_feishu_outbox_item(self, item: FeishuOutboxItem) -> str:
         payload = item.payload
@@ -1284,17 +1354,25 @@ class AgentDaemon:
 
     def _developer_instructions(self, active: ActiveRun, resolved: ResolvedContext) -> str:
         injected_skills = ', '.join(skill.name for skill in resolved.skills) or 'none'
+        prompt_files = ', '.join(file.label for file in resolved.prompt_files) or 'none'
         lines = [
             'You are running inside agentd, a Feishu-to-Codex control plane.',
             '',
             'Runtime context:',
             f'- session_kind: {active.session.kind}',
             f'- agentd_session_id: {active.session.id}',
+            f'- config_path: {self.config.config_path}',
+            f'- home_dir: {self.config.home_dir}',
+            f'- source_dir: {self.config.source_dir}',
+            f'- state_dir: {self.config.state_dir}',
+            f'- workspace: {self.config.workspace}',
             f'- cwd: {active.session.cwd}',
+            f'- context_dir: {self.config.context.context_dir}',
             f'- context_profile: {resolved.profile.name}',
             f'- context_config_path: {self.config.context.path}',
             f'- profiles_available: {", ".join(sorted(self.config.context.profiles))}',
             f'- memory_dir: {resolved.memory_dir}',
+            f'- prompt_files: {prompt_files}',
             f'- injected_skills: {injected_skills}',
             '',
             'Agentd contract:',
@@ -1306,13 +1384,33 @@ class AgentDaemon:
             '- Example delegation command: `printf %s "$child_task" | "$AGENTD_CLI" spawn-child --cwd /path/to/work --title "short title" --skills bookkeeping,calendar`.',
             '',
             'Context policy:',
-            '- Follow repo guidance from AGENTS.md.',
-            '- For prior work, preferences, decisions, dates, people, or todos, search memory files with `rg` first and load only relevant snippets. Do not read all memory by default.',
+            '- Treat the injected agentd context files below as persistent user-managed context.',
+            '- The current user request takes precedence over older context or memory if they conflict.',
+            '- MEMORY.md is injected as an index. For deeper prior work, preferences, decisions, dates, people, or todos, search memory files with `rg` first and load only relevant snippets.',
             '- Only the injected skills are enabled in this Codex run. Read a SKILL.md only when its description clearly matches the task.',
             '- To use another profile or skill set, delegate with `--profile <profile>` or `--skills a,b`.',
         ]
         if resolved.missing_skills:
             lines.append(f'- missing_skills: {", ".join(resolved.missing_skills)}')
+        if resolved.prompt_files:
+            lines.extend(
+                [
+                    '',
+                    'Agentd context files:',
+                    'The following files are injected by agentd from the configured context directory.',
+                ]
+            )
+            for file in resolved.prompt_files:
+                lines.extend(
+                    [
+                        '',
+                        f'## {file.label}',
+                        f'Path: {file.path}',
+                        '<agentd_context_file>',
+                        file.text,
+                        '</agentd_context_file>',
+                    ]
+                )
         return '\n'.join(lines)
 
     def _codex_extra_env(self, active: ActiveRun) -> dict[str, str]:

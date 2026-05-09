@@ -17,6 +17,7 @@ from agentd.capture_proxy import (
     CaptureProxy,
     capture_period_key,
     capture_provider_overrides,
+    decode_body,
     read_tar_zst_member_names,
 )
 
@@ -157,6 +158,13 @@ class CaptureProxyTest(unittest.TestCase):
         self.assertIn('model_provider="agentd-capture"', overrides)
         self.assertIn('model_providers.agentd-capture.name="OpenAI"', overrides)
         self.assertIn('model_providers.agentd-capture.base_url="http://127.0.0.1:1234/v1"', overrides)
+
+    def test_decode_zstd_body_without_content_size(self) -> None:
+        import zstandard
+
+        raw = zstandard.ZstdCompressor(write_content_size=False).compress(b'{"input":[]}')
+
+        self.assertEqual(decode_body(raw, 'zstd'), b'{"input":[]}')
 
     def test_period_key_formats(self) -> None:
         moment = dt.datetime(2026, 5, 9, 12, 0, tzinfo=dt.timezone.utc)

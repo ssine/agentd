@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime as dt
 import gzip
 import http.client
+import io
 import json
 import os
 import re
@@ -748,7 +749,8 @@ def decode_body(raw_body: bytes, content_encoding: str) -> bytes | None:
             import zstandard  # type: ignore[import-not-found]
         except ModuleNotFoundError:
             return None
-        return zstandard.ZstdDecompressor().decompress(raw_body)
+        with zstandard.ZstdDecompressor().stream_reader(io.BytesIO(raw_body)) as reader:
+            return reader.read()
     return None
 
 

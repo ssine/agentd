@@ -263,7 +263,7 @@ class CodexAppServer:
             'initialize',
             {
                 'clientInfo': {'name': 'agentd', 'version': '0.1.0'},
-                'capabilities': None,
+                'capabilities': {'experimentalApi': True},
             },
             timeout=self.config.startup_timeout_seconds,
         )

@@ -7,6 +7,7 @@ from contextlib import redirect_stdout
 from dataclasses import replace
 from io import StringIO
 from pathlib import Path
+from unittest.mock import patch
 
 from agentd.codex_app_server import CodexRunControl
 from agentd.config import AgentdConfig, CodexConfig, FeishuConfig, WebConfig
@@ -14,6 +15,7 @@ from agentd.context import ContextConfig, ContextProfile
 from agentd.daemon import ActiveRun, AgentDaemon
 from agentd.registry import Registry
 from agentd.schedule import ScheduleConfig
+from agentd.service import read_startup_notice, write_startup_notice
 
 
 class DurableRunRegistryTest(unittest.TestCase):
@@ -58,6 +60,35 @@ class DurableRunRegistryTest(unittest.TestCase):
             )
             self.assertEqual(reopened.claim_pending_outbox(), [])
 
+    def test_requeued_status_outbox_resets_attempt_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_dir:
+            root = Path(raw_dir)
+            registry = Registry(root / 'agentd.sqlite')
+
+            for index in range(12):
+                registry.upsert_outbox(
+                    kind='status_card',
+                    dedupe_key='run:1:status_card',
+                    run_id=1,
+                    replace_sent=True,
+                    payload={'card': {'version': index}},
+                )
+
+                claimed = registry.claim_pending_outbox(max_attempts=10)
+                self.assertEqual(len(claimed), 1)
+                self.assertEqual(claimed[0].attempts, 1)
+                registry.finish_outbox(claimed[0].id, sent=True)
+
+                with registry.connect() as conn:
+                    row = conn.execute(
+                        'select state, attempts from feishu_outbox where id = ?',
+                        (claimed[0].id,),
+                    ).fetchone()
+                self.assertIsNotNone(row)
+                assert row is not None
+                self.assertEqual(row['state'], 'sent')
+                self.assertEqual(row['attempts'], 0)
+
     def test_stale_active_runs_are_discoverable_by_lease(self) -> None:
         with tempfile.TemporaryDirectory() as raw_dir:
             root = Path(raw_dir)
@@ -76,6 +107,53 @@ class DurableRunRegistryTest(unittest.TestCase):
             stale = registry.list_stale_active_runs(now=int(time.time()))
 
             self.assertEqual([item.id for item in stale], [run.id])
+
+    def test_idle_work_count_tracks_runs_cards_and_outbox(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_dir:
+            root = Path(raw_dir)
+            registry = Registry(root / 'agentd.sqlite')
+            session = registry.get_main_session('chat-1', str(root))
+            run = registry.create_run(
+                session_id=session.id,
+                source_message_id='msg-1',
+                prompt='hello',
+                host='host-a',
+                subject='Codex',
+                display_title='Durable run',
+            )
+
+            self.assertGreaterEqual(registry.idle_work_count(), 1)
+
+            registry.update_run(
+                run.id,
+                state='succeeded',
+                status_phase='done',
+                status='完成',
+                finished_at=int(time.time()),
+            )
+            self.assertEqual(registry.idle_work_count(), 1)
+
+            registry.mark_card_sent(run.id, remote_message_id='card-1', render_hash='hash-1')
+            self.assertEqual(registry.idle_work_count(), 0)
+
+            registry.update_run_and_mark_card_dirty(run.id, status='完成')
+            self.assertEqual(registry.idle_work_count(), 1)
+
+            registry.mark_card_sent(run.id, remote_message_id='card-1', render_hash='hash-2')
+            self.assertEqual(registry.idle_work_count(), 0)
+
+            outbox_id = registry.upsert_outbox(
+                kind='status_card',
+                dedupe_key=f'run:{run.id}:status_card',
+                run_id=run.id,
+                payload={'card': {'version': 1}},
+            )
+            self.assertEqual(registry.idle_work_count(), 1)
+            self.assertEqual([item.id for item in registry.claim_pending_outbox()], [outbox_id])
+            self.assertEqual(registry.idle_work_count(), 1)
+
+            registry.finish_outbox(outbox_id, sent=True)
+            self.assertEqual(registry.idle_work_count(), 0)
 
 
 class DurableRunProjectionTest(unittest.TestCase):
@@ -103,6 +181,37 @@ class DurableRunProjectionTest(unittest.TestCase):
             self.assertEqual(recovered.state, 'interrupted')
             self.assertEqual(recovered.status_phase, 'stopped')
             self.assertIn('无法重新附着', daemon.registry.list_run_events(run.id)[0].payload['text'])
+
+    def test_recovery_finishes_stale_run_when_final_reply_was_sent(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_dir:
+            root = Path(raw_dir)
+            config = make_config(root)
+            daemon = AgentDaemon(config, dry_send=True)
+            session = daemon.registry.get_main_session('chat-1', str(root))
+            run = daemon.registry.create_run(
+                session_id=session.id,
+                source_message_id='msg-1',
+                prompt='hello',
+                host='host-a',
+                subject='Codex',
+                display_title='Durable run',
+                lease_seconds=-1,
+            )
+            daemon.registry.update_run(
+                run.id,
+                final_message_text='done',
+                final_message_sent_at=int(time.time()),
+            )
+
+            daemon._recover_stale_runs()
+
+            recovered = daemon.registry.get_run(run.id)
+            self.assertIsNotNone(recovered)
+            assert recovered is not None
+            self.assertEqual(recovered.state, 'succeeded')
+            self.assertEqual(recovered.status_phase, 'done')
+            self.assertEqual(recovered.status, '完成')
+            self.assertEqual(daemon.registry.list_run_events(run.id), [])
 
     def test_status_projection_rebuilds_from_database_without_active_run(self) -> None:
         with tempfile.TemporaryDirectory() as raw_dir:
@@ -160,6 +269,32 @@ class DurableRunProjectionTest(unittest.TestCase):
             assert updated is not None
             self.assertEqual(updated.final_message_text, 'done')
 
+    def test_feishu_outbox_send_slot_is_throttled(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_dir:
+            root = Path(raw_dir)
+            daemon = AgentDaemon(make_config(root), dry_send=False)
+            daemon._last_feishu_send_at = time.monotonic()
+
+            with patch('agentd.daemon.time.sleep') as sleep:
+                daemon._wait_for_feishu_send_slot()
+
+            sleep.assert_called_once()
+            self.assertGreater(sleep.call_args.args[0], 0.9)
+            self.assertLessEqual(sleep.call_args.args[0], 1)
+
+    def test_startup_notice_is_cleared_in_dry_send_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_dir:
+            root = Path(raw_dir)
+            daemon = AgentDaemon(make_config(root), dry_send=True)
+            write_startup_notice(
+                daemon.config,
+                {'chat_id': 'chat-1', 'text': 'started', 'created_at': time.time()},
+            )
+
+            daemon._send_startup_notice_if_needed()
+
+            self.assertIsNone(read_startup_notice(daemon.config))
+
     def test_web_gateway_starts_when_enabled(self) -> None:
         with tempfile.TemporaryDirectory() as raw_dir:
             root = Path(raw_dir)
@@ -179,6 +314,38 @@ class DurableRunProjectionTest(unittest.TestCase):
             self.assertGreater(gateway.server.server_address[1], 0)
             gateway.server.shutdown()
             gateway.server.server_close()
+
+    def test_developer_instructions_include_context_prompt_files(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_dir:
+            root = Path(raw_dir)
+            memory_dir = root / 'memory'
+            memory_dir.mkdir()
+            (root / 'CONTEXT.md').write_text('general context', encoding='utf-8')
+            (memory_dir / 'MEMORY.md').write_text('memory index', encoding='utf-8')
+            context = ContextConfig(
+                path=root / 'context.toml',
+                context_dir=root,
+                memory_dir=memory_dir,
+                prompt_files=(root / 'CONTEXT.md', memory_dir / 'MEMORY.md'),
+                profiles={'default': ContextProfile(name='default')},
+            )
+            config = replace(make_config(root), context=context)
+            daemon = AgentDaemon(config, dry_send=True)
+            session = daemon.registry.get_main_session('chat-1', str(root))
+            active = ActiveRun(run_id=1, session=session, control=CodexRunControl())
+
+            text = daemon._developer_instructions(active, daemon.context_resolver.resolve())
+
+            self.assertIn(f'config_path: {config.config_path}', text)
+            self.assertIn(f'home_dir: {config.home_dir}', text)
+            self.assertIn(f'source_dir: {config.source_dir}', text)
+            self.assertIn(f'state_dir: {config.state_dir}', text)
+            self.assertIn(f'workspace: {config.workspace}', text)
+            self.assertIn(f'context_dir: {config.context.context_dir}', text)
+            self.assertIn('prompt_files: CONTEXT.md, memory/MEMORY.md', text)
+            self.assertIn('general context', text)
+            self.assertIn('memory index', text)
+            self.assertNotIn('Follow repo guidance from AGENTS.md', text)
 
 
 def make_config(root: Path) -> AgentdConfig:

@@ -34,8 +34,8 @@ Important path defaults:
 
 - `AGENTD_HOME` defaults to `~/.agentd`; the default config path is `~/.agentd/agentd.toml`.
 - `agentd.source_dir` points at the cloned agentd source tree.
-- `agentd.state_dir` stores agentd's own process and registry state, and is relative to `AGENTD_HOME` when not absolute.
-- `agentd.workspace` is where Codex turns run and defaults to `agentd.source_dir`.
+- `agentd.state_dir` stores agentd's own process and registry state, defaults to `AGENTD_HOME/state`, and is relative to `AGENTD_HOME` when not absolute.
+- `agentd.workspace` is where Codex turns run and defaults to `context.dir`.
 - `context.dir` points at user-maintained context, which can be a separate git repo.
 - `context.config` and `context.schedules` are relative to `context.dir`.
 - `codex.command` defaults to `codex`. Set it to an absolute path or wrapper command if needed.
@@ -112,9 +112,22 @@ Keep it on localhost unless an authenticated reverse proxy is in front of it.
 Context is intentionally thin and user-controlled:
 
 - `context.toml`: context profiles and allowed skill names.
+- `CONTEXT.md`: context-level instructions injected into every Codex prompt by agentd.
+- `memory/MEMORY.md`: memory index injected into every Codex prompt by agentd.
 - `skills/**/SKILL.md`: context-local skills scanned by name from YAML frontmatter.
-- `memory/MEMORY.md` and `memory/daily/YYYY-MM-DD.md`: Markdown memory searched with `rg` by the agent when prior work, preferences, decisions, dates, people, or todos are relevant.
+- `skills = ["*"]`: profile shorthand that injects every discovered skill.
+- `memory/**`: deeper Markdown memory searched with `rg` by the agent when prior work, preferences, decisions, dates, people, or todos are relevant.
 - `schedules.toml`: lightweight scheduled jobs.
+
+Agentd also injects its built-in `agentd-ops` skill into every managed Codex run.
+
+The default context prompt files are configured in `context.toml`:
+
+```toml
+[context]
+prompt_files = ["CONTEXT.md", "memory/MEMORY.md"]
+prompt_file_max_bytes = 65536
+```
 
 Child sessions can choose context explicitly:
 

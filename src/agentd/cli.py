@@ -158,6 +158,8 @@ def config_check(config: AgentdConfig) -> int:
     print(f'context_default_profile={config.context.default_profile}')
     print(f'context_default_child_profile={config.context.default_child_profile}')
     print(f'context_skill_roots={",".join(str(path) for path in config.context.skill_roots)}')
+    print(f'context_prompt_files={",".join(str(path) for path in config.context.prompt_files)}')
+    print(f'context_prompt_file_max_bytes={config.context.prompt_file_max_bytes}')
     print(f'profiles_available={",".join(sorted(config.context.profiles))}')
     try:
         resolver = ContextResolver(config.context, config.workspace)

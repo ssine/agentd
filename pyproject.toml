@@ -19,6 +19,9 @@ agentd = "agentd.cli:main"
 [tool.uv]
 package = true
 
+[tool.setuptools.package-data]
+agentd = ["skills/**/SKILL.md"]
+
 [tool.ruff]
 line-length = 120
 target-version = "py310"

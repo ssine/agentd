@@ -14,6 +14,14 @@ class ResumeThreadTest(unittest.TestCase):
 
         self.assertEqual(overrides, ['skills.config=[]', 'features.multi_agent=false'])
 
+    def test_initialize_enables_experimental_api(self) -> None:
+        server = RecordingCodexAppServer()
+
+        server._initialize(None, None)
+
+        self.assertEqual(server.requests[0][0], 'initialize')
+        self.assertEqual(server.requests[0][1]['capabilities'], {'experimentalApi': True})
+
     def test_resume_thread_does_not_require_experimental_exclude_turns(self) -> None:
         server = RecordingCodexAppServer()
         session = AgentSession(
@@ -88,6 +96,8 @@ class RecordingCodexAppServer(CodexAppServer):
             return {'thread': {'id': 'new-thread'}}
         if method == 'turn/start':
             return {'turn': {'id': 'turn-1'}}
+        if method == 'initialize':
+            return {}
         raise AssertionError(f'unexpected request: {method}')
 
 

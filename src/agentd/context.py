@@ -11,11 +11,23 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10 fallback
     import tomli as tomllib
 
 
+BUILTIN_SKILL_ROOTS = (Path(__file__).resolve().parent / 'skills',)
+FORCED_SKILLS = ('agentd-ops',)
+
+
 @dataclass(frozen=True)
 class SkillInfo:
     name: str
     description: str
     path: Path
+
+
+@dataclass(frozen=True)
+class ContextPromptFile:
+    path: Path
+    label: str
+    text: str
+    truncated: bool = False
 
 
 @dataclass(frozen=True)
@@ -33,6 +45,8 @@ class ContextConfig:
     default_profile: str = 'default'
     default_child_profile: str = 'default'
     skill_roots: tuple[Path, ...] = ()
+    prompt_files: tuple[Path, ...] = ()
+    prompt_file_max_bytes: int = 65536
     profiles: dict[str, ContextProfile] = field(default_factory=dict)
 
 
@@ -42,6 +56,7 @@ class ResolvedContext:
     skills: tuple[SkillInfo, ...]
     missing_skills: tuple[str, ...]
     memory_dir: Path
+    prompt_files: tuple[ContextPromptFile, ...] = ()
 
     def codex_config_overrides(self) -> list[str]:
         entries = ','.join('{path=' + json.dumps(str(skill.path)) + ',enabled=true}' for skill in self.skills)
@@ -53,25 +68,39 @@ class ContextResolver:
         self.config = config
         self.workspace = workspace
         self.memory_dir = config.memory_dir
-        self.skills = scan_skills(config.skill_roots)
+        self.builtin_skills = scan_skills(BUILTIN_SKILL_ROOTS)
+        configured_skills = scan_skills(config.skill_roots)
+        self.skills = {**self.builtin_skills, **configured_skills}
+        self.forced_skills = tuple(
+            skill for name in FORCED_SKILLS if (skill := self.builtin_skills.get(name)) is not None
+        )
 
     def resolve(self, profile_name: str = '', extra_skills: tuple[str, ...] = ()) -> ResolvedContext:
         profile_name = profile_name or self.config.default_profile
         profile = self.config.profiles.get(profile_name) or ContextProfile(name=profile_name)
-        requested = unique_names((*profile.skills, *extra_skills))
-        found: list[SkillInfo] = []
+        requested = expand_skill_names((*profile.skills, *extra_skills), self.skills)
+        found: list[SkillInfo] = list(self.forced_skills)
+        seen = {skill.name for skill in found}
         missing: list[str] = []
         for name in requested:
+            if name in seen:
+                continue
             skill = self.skills.get(name)
             if skill is None:
                 missing.append(name)
             else:
                 found.append(skill)
+                seen.add(name)
         return ResolvedContext(
             profile=profile,
             skills=tuple(found),
             missing_skills=tuple(missing),
             memory_dir=self.memory_dir,
+            prompt_files=load_prompt_files(
+                self.config.prompt_files,
+                context_dir=self.config.context_dir,
+                max_bytes=self.config.prompt_file_max_bytes,
+            ),
         )
 
 
@@ -90,6 +119,11 @@ def load_context_config(path: Path, context_dir: Path) -> ContextConfig:
     if skill_roots_raw is None:
         skill_roots_raw = ['skills', '~/.codex/skills']
     skill_roots = tuple(_as_path(item, context_dir) for item in _as_list(skill_roots_raw))
+    prompt_files_raw = context_raw.get('prompt_files')
+    if prompt_files_raw is None:
+        prompt_files_raw = ['CONTEXT.md', 'memory/MEMORY.md']
+    prompt_files = tuple(_as_path(item, context_dir) for item in _as_list(prompt_files_raw))
+    prompt_file_max_bytes = int(context_raw.get('prompt_file_max_bytes') or 65536)
 
     profiles: dict[str, ContextProfile] = {}
     for name, value in profiles_raw.items():
@@ -112,8 +146,48 @@ def load_context_config(path: Path, context_dir: Path) -> ContextConfig:
         default_profile=str(context_raw.get('default_profile') or 'default'),
         default_child_profile=str(context_raw.get('default_child_profile') or 'default'),
         skill_roots=skill_roots,
+        prompt_files=prompt_files,
+        prompt_file_max_bytes=prompt_file_max_bytes,
         profiles=profiles,
     )
+
+
+def load_prompt_files(paths: tuple[Path, ...], *, context_dir: Path, max_bytes: int) -> tuple[ContextPromptFile, ...]:
+    if max_bytes <= 0:
+        return ()
+    loaded: list[ContextPromptFile] = []
+    for path in paths:
+        try:
+            if not path.is_file():
+                continue
+            with path.open('rb') as fh:
+                data = fh.read(max_bytes + 1)
+        except OSError:
+            continue
+        truncated = len(data) > max_bytes
+        if truncated:
+            data = data[:max_bytes]
+        text = data.decode('utf-8', errors='replace').strip()
+        if not text:
+            continue
+        if truncated:
+            text += f'\n\n[agentd: truncated after {max_bytes} bytes]'
+        loaded.append(
+            ContextPromptFile(
+                path=path,
+                label=prompt_file_label(path, context_dir),
+                text=text,
+                truncated=truncated,
+            )
+        )
+    return tuple(loaded)
+
+
+def prompt_file_label(path: Path, context_dir: Path) -> str:
+    try:
+        return str(path.relative_to(context_dir))
+    except ValueError:
+        return str(path)
 
 
 def scan_skills(roots: tuple[Path, ...]) -> dict[str, SkillInfo]:
@@ -184,6 +258,18 @@ def split_skill_names(value: Any) -> tuple[str, ...]:
     if isinstance(value, list):
         return unique_names(str(item).strip() for item in value)
     return ()
+
+
+def expand_skill_names(requested: tuple[str, ...], available: dict[str, SkillInfo]) -> tuple[str, ...]:
+    if not any(is_all_skills_marker(name) for name in requested):
+        return unique_names(requested)
+    names = [name for name in sorted(available) if name]
+    names.extend(name for name in requested if not is_all_skills_marker(name))
+    return unique_names(names)
+
+
+def is_all_skills_marker(name: str) -> bool:
+    return name.strip().lower() in {'*', 'all'}
 
 
 def unique_names(values: tuple[str, ...] | list[str] | Any) -> tuple[str, ...]:

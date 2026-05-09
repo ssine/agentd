@@ -6,9 +6,6 @@ executable = ".venv/bin/agentd"
 # Source tree for agentd itself. Relative paths are resolved from this config file.
 source_dir = "/path/to/agentd"
 
-# Workspace where Codex turns run.
-workspace = "."
-state_dir = "state"
 log_level = "INFO"
 
 [context]
@@ -16,6 +13,7 @@ log_level = "INFO"
 dir = "~/agent-context"
 config = "context.toml"
 schedules = "schedules.toml"
+# The context config defaults to injecting CONTEXT.md and memory/MEMORY.md into Codex prompts.
 
 [feishu]
 # app_id and app_secret can also be supplied by environment:
