@@ -619,6 +619,23 @@ class Registry:
             ).fetchone()
         return int(row['count']) if row else 0
 
+    def has_recently_finished_run(self, *, within_seconds: int, now: int | None = None) -> bool:
+        if within_seconds <= 0:
+            return False
+        now = int(time.time()) if now is None else now
+        cutoff = now - within_seconds
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                select 1
+                from runs
+                where finished_at is not null and finished_at >= ?
+                limit 1
+                """,
+                (cutoff,),
+            ).fetchone()
+        return row is not None
+
     def get_run_for_status_card(self, message_id: str) -> RunRecord | None:
         if not message_id:
             return None
@@ -1177,7 +1194,7 @@ class Registry:
                 update feishu_outbox
                 set state = 'failed_retryable',
                     updated_at = ?
-                where state = 'sending' and updated_at < ?
+                where state = 'sending' and updated_at <= ?
                 """,
                 (int(time.time()), cutoff),
             )

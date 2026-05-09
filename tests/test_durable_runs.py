@@ -17,7 +17,12 @@ from agentd.daemon import ActiveRun, AgentDaemon
 from agentd.models import SpawnRequest
 from agentd.registry import Registry
 from agentd.schedule import ScheduleConfig
-from agentd.service import read_startup_notice, write_startup_notice
+from agentd.service import (
+    read_deferred_service_command,
+    read_startup_notice,
+    write_deferred_service_command,
+    write_startup_notice,
+)
 
 
 class DurableRunRegistryTest(unittest.TestCase):
@@ -156,6 +161,43 @@ class DurableRunRegistryTest(unittest.TestCase):
 
             registry.finish_outbox(outbox_id, sent=True)
             self.assertEqual(registry.idle_work_count(), 0)
+
+    def test_sending_outbox_can_be_reset_immediately_after_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_dir:
+            root = Path(raw_dir)
+            registry = Registry(root / 'agentd.sqlite')
+            outbox_id = registry.upsert_outbox(
+                kind='status_card',
+                dedupe_key='run:1:status_card',
+                run_id=1,
+                payload={'card': {'version': 1}},
+            )
+
+            self.assertEqual([item.id for item in registry.claim_pending_outbox()], [outbox_id])
+            self.assertEqual(registry.claim_pending_outbox(), [])
+
+            registry.reset_stuck_outbox(older_than_seconds=0)
+
+            self.assertEqual([item.id for item in registry.claim_pending_outbox()], [outbox_id])
+
+    def test_recently_finished_runs_are_detected_for_restart_grace(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_dir:
+            root = Path(raw_dir)
+            registry = Registry(root / 'agentd.sqlite')
+            session = registry.get_main_session('chat-1', str(root))
+            run = registry.create_run(
+                session_id=session.id,
+                source_message_id='msg-1',
+                prompt='hello',
+                host='host-a',
+                subject='Codex',
+                display_title='Finished run',
+            )
+            now = int(time.time())
+            registry.update_run(run.id, state='succeeded', status_phase='done', status='完成', finished_at=now)
+
+            self.assertTrue(registry.has_recently_finished_run(within_seconds=5, now=now + 4))
+            self.assertFalse(registry.has_recently_finished_run(within_seconds=5, now=now + 6))
 
 
 class DurableRunProjectionTest(unittest.TestCase):
@@ -427,6 +469,40 @@ class DurableRunProjectionTest(unittest.TestCase):
 
             self.assertEqual([call[0] for call in fake.updated], ['card-1', 'card-1'])
             self.assertEqual(fake.updated[-1][1]['header']['template'], 'green')
+
+    def test_deferred_restart_waits_for_terminal_replay_grace(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_dir:
+            root = Path(raw_dir)
+            config = make_config(root)
+            daemon = AgentDaemon(config, dry_send=True)
+            session = daemon.registry.get_main_session('chat-1', str(root))
+            run = daemon.registry.create_run(
+                session_id=session.id,
+                source_message_id='msg-1',
+                prompt='hello',
+                host='host-a',
+                subject='Codex',
+                display_title='Finished run',
+                status_message_id='card-1',
+            )
+            daemon.registry.update_run(
+                run.id,
+                state='succeeded',
+                status_phase='done',
+                status='完成',
+                finished_at=int(time.time()),
+            )
+            daemon.registry.mark_card_sent(run.id, remote_message_id='card-1', render_hash='hash-1')
+            write_deferred_service_command(
+                config,
+                {'command': 'restart', 'backend': 'process', 'not_before': 0, 'timeout_seconds': 7},
+            )
+
+            with patch('agentd.service.launch_service_command') as launch:
+                daemon._maybe_run_deferred_service_command()
+
+            launch.assert_not_called()
+            self.assertIsNotNone(read_deferred_service_command(config))
 
     def test_spawned_child_uses_thread_intro_message_as_status_card(self) -> None:
         with tempfile.TemporaryDirectory() as raw_dir:

@@ -68,6 +68,7 @@ STATUS_TICK_SECONDS = 5
 STATUS_UPDATE_MIN_INTERVAL_SECONDS = 1
 TERMINAL_STATUS_REPLAY_DELAY_SECONDS = 3
 TERMINAL_STATUS_PHASES = {'done', 'failed', 'stopped'}
+DEFERRED_RESTART_TERMINAL_GRACE_SECONDS = TERMINAL_STATUS_REPLAY_DELAY_SECONDS + 2
 SCHEDULE_POLL_SECONDS = 30
 
 __all__ = [
@@ -148,6 +149,7 @@ class AgentDaemon:
         self.delivery_dispatcher.last_feishu_send_at = value
 
     def serve(self) -> None:
+        self._reset_abandoned_outbox_on_startup()
         self._ensure_spawn_watcher()
         self._ensure_scheduler()
         self._ensure_web_gateway()
@@ -227,6 +229,8 @@ class AgentDaemon:
             active_count = len(self._active_runs)
         if active_count or self.registry.idle_work_count():
             return
+        if self.registry.has_recently_finished_run(within_seconds=DEFERRED_RESTART_TERMINAL_GRACE_SECONDS):
+            return
 
         clear_deferred_service_command(self.config)
         try:
@@ -241,6 +245,9 @@ class AgentDaemon:
             self._last_feishu_send_at = time.monotonic()
         self.log.info('launching deferred service restart after daemon became idle')
         launch_service_command(self.config, backend, command, delay_seconds=0.2, timeout_seconds=timeout_seconds)
+
+    def _reset_abandoned_outbox_on_startup(self) -> None:
+        self.registry.reset_stuck_outbox(older_than_seconds=0)
 
     def _send_startup_notice_if_needed(self) -> None:
         from .service import clear_startup_notice, read_startup_notice, send_service_notice
