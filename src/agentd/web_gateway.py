@@ -3,15 +3,14 @@ from __future__ import annotations
 import json
 import shlex
 import threading
-import time
-from dataclasses import asdict, is_dataclass
+from dataclasses import asdict, is_dataclass, replace
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+from .channels.web import WebChannelAdapter
 from .config import AgentdConfig
-from .models import IncomingMessage
 from .registry import Registry
 from .web_trace import build_responses_trace, exchange_detail, load_exchange
 
@@ -138,26 +137,18 @@ class WebGatewayHandler(BaseHTTPRequestHandler):
 
 
 def handle_web_message(daemon: Any, payload: dict[str, Any]) -> dict[str, Any]:
-    text = str(payload.get('text') or '').strip()
-    if not text:
+    adapter = WebChannelAdapter()
+    envelope = adapter.envelope_from_payload(payload)
+    if not envelope.text:
         raise ValueError('text is required')
 
     registry = daemon.registry
     session_id = parse_int(payload.get('session_id'))
     session = registry.get_session(session_id) if session_id is not None else None
-    chat_id = str(payload.get('chat_id') or (session.chat_id if session else 'web')).strip() or 'web'
-    thread_id = session.thread_id if session and session.thread_id else str(payload.get('thread_id') or '')
-    message = IncomingMessage(
-        chat_id=chat_id,
-        message_id=f'web-{time.time_ns()}',
-        thread_id=thread_id or '',
-        sender_open_id='web-user',
-        sender_name='web',
-        sender_type='user',
-        text=text,
-        chat_type='p2p',
-    )
-    result = daemon.handle_message(message)
+    chat_id = str(envelope.conversation_ref or (session.chat_id if session else 'web')).strip() or 'web'
+    thread_id = session.thread_id if session and session.thread_id else envelope.thread_ref
+    envelope = replace(envelope, conversation_ref=chat_id, thread_ref=thread_id or '')
+    result = daemon.handle_control_command(adapter.submit_message(envelope))
     return {
         'ok': True,
         'result': result,

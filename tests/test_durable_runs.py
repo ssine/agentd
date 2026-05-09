@@ -251,10 +251,15 @@ class DurableRunProjectionTest(unittest.TestCase):
             root = Path(raw_dir)
             config = make_config(root)
             daemon = AgentDaemon(config, dry_send=False)
-            session = daemon.registry.get_main_session('web', str(root))
+            session = daemon.registry.get_main_session(
+                'browser-1',
+                str(root),
+                channel='web',
+                conversation_ref='browser-1',
+            )
             run = daemon.registry.create_run(
                 session_id=session.id,
-                source_message_id='web-1',
+                source_message_id='msg-1',
                 prompt='hello',
                 host='host-a',
                 subject='Codex',
@@ -270,6 +275,9 @@ class DurableRunProjectionTest(unittest.TestCase):
             self.assertIsNotNone(updated)
             assert updated is not None
             self.assertEqual(updated.final_message_text, 'done')
+            deliveries = daemon.registry.list_deliveries(run_id=run.id)
+            self.assertEqual({delivery.channel for delivery in deliveries}, {'web'})
+            self.assertEqual({delivery.state for delivery in deliveries}, {'sent'})
 
     def test_retryable_codex_error_keeps_status_card_running(self) -> None:
         with tempfile.TemporaryDirectory() as raw_dir:
@@ -582,7 +590,7 @@ class DurableRunProjectionTest(unittest.TestCase):
             daemon = AgentDaemon(make_config(root), dry_send=False)
             daemon._last_feishu_send_at = time.monotonic()
 
-            with patch('agentd.daemon.time.sleep') as sleep:
+            with patch('agentd.delivery_dispatcher.time.sleep') as sleep:
                 daemon._wait_for_feishu_send_slot()
 
             sleep.assert_called_once()
