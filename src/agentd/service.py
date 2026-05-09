@@ -395,19 +395,6 @@ def defer_service_command(
     selected = select_backend(backend)
     notify_chat_id = service_notice_chat_id()
     if command == 'restart' and service_running(config, selected):
-        if not daemon_can_consume_deferred_service_command(config, selected):
-            launch_idle_service_command(
-                config,
-                selected,
-                command,
-                not_before=time.time() + defer_seconds,
-                timeout_seconds=timeout_seconds,
-            )
-            print(
-                f'scheduled agentd service restart after active runs finish via external idle watcher, '
-                f'not before {defer_seconds:g}s'
-            )
-            return 0
         write_deferred_service_command(
             config,
             {
@@ -431,54 +418,6 @@ def service_running(config: AgentdConfig, backend: str) -> bool:
     if backend == 'systemd':
         return systemd_is_active()
     return pid_running(read_pid(pid_path(config)))
-
-
-def daemon_can_consume_deferred_service_command(config: AgentdConfig, backend: str) -> bool:
-    pid = service_main_pid(config, backend)
-    started_at = pid_started_at(pid)
-    if started_at <= 0:
-        return False
-    code_mtime = max(Path(__file__).stat().st_mtime, (Path(__file__).parent / 'daemon.py').stat().st_mtime)
-    return started_at >= code_mtime
-
-
-def service_main_pid(config: AgentdConfig, backend: str) -> int:
-    if backend == 'systemd':
-        if not systemd_available():
-            return 0
-        result = subprocess.run(
-            ['systemctl', '--user', 'show', UNIT_NAME, '--property=MainPID', '--value'],
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        try:
-            return int(result.stdout.strip())
-        except ValueError:
-            return 0
-    return read_pid(pid_path(config))
-
-
-def pid_started_at(pid: int) -> float:
-    if pid <= 0:
-        return 0
-    try:
-        stat = (Path('/proc') / str(pid) / 'stat').read_text(encoding='utf-8')
-        uptime = float(Path('/proc/uptime').read_text(encoding='utf-8').split()[0])
-    except (OSError, ValueError, IndexError):
-        return 0
-    end = stat.rfind(')')
-    if end == -1:
-        return 0
-    parts = stat[end + 2 :].split()
-    if len(parts) <= 19:
-        return 0
-    try:
-        start_ticks = int(parts[19])
-        ticks_per_second = int(os.sysconf('SC_CLK_TCK'))
-    except (OSError, ValueError):
-        return 0
-    return time.time() - uptime + (start_ticks / ticks_per_second)
 
 
 def deferred_service_request_path(config: AgentdConfig) -> Path:
@@ -581,72 +520,6 @@ def launch_service_command(
         '-c',
         script,
         str(delay_seconds),
-        str(agentd_executable(config)),
-        '--config',
-        str(config.config_path),
-        'service',
-        command,
-        '--backend',
-        backend,
-    ]
-    if command in {'restart', 'stop'}:
-        args.extend(['--timeout', str(timeout_seconds)])
-    with service_log_path(config).open('a', encoding='utf-8') as log:
-        subprocess.Popen(
-            args,
-            cwd=config.workspace,
-            stdin=subprocess.DEVNULL,
-            stdout=log,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-            text=True,
-        )
-
-
-def launch_idle_service_command(
-    config: AgentdConfig,
-    backend: str,
-    command: str,
-    *,
-    not_before: float,
-    timeout_seconds: int = 10,
-) -> None:
-    config.log_dir.mkdir(parents=True, exist_ok=True)
-    script = (
-        'import subprocess, sys, time\n'
-        'from pathlib import Path\n'
-        'from agentd.registry import Registry\n'
-        'db_path = Path(sys.argv[1])\n'
-        'not_before = float(sys.argv[2])\n'
-        'poll_seconds = float(sys.argv[3])\n'
-        'idle_grace_seconds = float(sys.argv[4])\n'
-        'cmd = sys.argv[5:]\n'
-        'time.sleep(max(0, not_before - time.time()))\n'
-        'idle_since = None\n'
-        'while True:\n'
-        '    try:\n'
-        '        idle = Registry(db_path).idle_work_count() == 0\n'
-        '    except Exception as exc:\n'
-        '        print(f"waiting for agentd idle failed: {exc}", flush=True)\n'
-        '        idle = False\n'
-        '    now = time.time()\n'
-        '    if idle:\n'
-        '        idle_since = idle_since or now\n'
-        '        if now - idle_since >= idle_grace_seconds:\n'
-        '            break\n'
-        '    else:\n'
-        '        idle_since = None\n'
-        '    time.sleep(poll_seconds)\n'
-        'raise SystemExit(subprocess.call(cmd))\n'
-    )
-    args = [
-        sys.executable,
-        '-c',
-        script,
-        str(config.db_path),
-        str(not_before),
-        '1',
-        '3',
         str(agentd_executable(config)),
         '--config',
         str(config.config_path),

@@ -72,7 +72,6 @@ class ServiceRequestTest(unittest.TestCase):
                 patch.dict(environ, {'AGENTD_CHAT_ID': 'chat-1'}, clear=False),
                 patch('agentd.service.select_backend', return_value='process'),
                 patch('agentd.service.service_running', return_value=True),
-                patch('agentd.service.daemon_can_consume_deferred_service_command', return_value=True),
                 redirect_stdout(StringIO()),
             ):
                 result = defer_service_command(config, 'auto', 'restart', 5, timeout_seconds=7)
@@ -83,26 +82,29 @@ class ServiceRequestTest(unittest.TestCase):
             assert request is not None
             self.assertEqual(request['notify_chat_id'], 'chat-1')
 
-    def test_deferred_restart_fallback_waits_for_idle(self) -> None:
+    def test_deferred_restart_writes_request_even_when_daemon_is_older_than_code(self) -> None:
         with tempfile.TemporaryDirectory() as raw_dir:
             runtime_dir = Path(raw_dir)
             config = SimpleNamespace(runtime_dir=runtime_dir)
+            stdout = StringIO()
 
             with (
                 patch('agentd.service.select_backend', return_value='process'),
                 patch('agentd.service.service_running', return_value=True),
-                patch('agentd.service.daemon_can_consume_deferred_service_command', return_value=False),
-                patch('agentd.service.launch_idle_service_command') as launch_idle,
-                redirect_stdout(StringIO()),
+                patch('agentd.service.launch_service_command') as launch_service,
+                redirect_stdout(stdout),
             ):
                 result = defer_service_command(config, 'auto', 'restart', 5, timeout_seconds=7)
 
             self.assertEqual(result, 0)
-            launch_idle.assert_called_once()
-            args, kwargs = launch_idle.call_args
-            self.assertEqual(args, (config, 'process', 'restart'))
-            self.assertGreater(kwargs['not_before'], 0)
-            self.assertEqual(kwargs['timeout_seconds'], 7)
+            launch_service.assert_not_called()
+            request = read_deferred_service_command(config)
+            self.assertIsNotNone(request)
+            assert request is not None
+            self.assertEqual(request['command'], 'restart')
+            self.assertEqual(request['backend'], 'process')
+            self.assertEqual(request['timeout_seconds'], 7)
+            self.assertIn('scheduled agentd service restart after active runs finish', stdout.getvalue())
 
 
 if __name__ == '__main__':
