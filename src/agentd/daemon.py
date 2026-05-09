@@ -1378,7 +1378,7 @@ class AgentDaemon:
             'Agentd contract:',
             '- Agentd sends your final answer back to Feishu. Do not call Feishu send/reply commands yourself unless the user explicitly asks you to send an additional proactive message.',
             '- For agentd service status, logs, health checks, start, stop, or restart, use `"$AGENTD_CLI" service ...`.',
-            '- Agentd persists run, card, and final-reply state across restarts. Use `"$AGENTD_CLI" service restart --defer 10` when you want to avoid interrupting the current turn.',
+            '- Agentd persists run, card, and final-reply state across restarts. Use `"$AGENTD_CLI" service restart --defer` when you want to avoid interrupting the current turn.',
             '- If you will handle substantial work in this session, set a concise task title once early with `"$AGENTD_CLI" set-title "<title>"`.',
             '- If you delegate, do not call `set-title` in the parent session. Run `"$AGENTD_CLI" spawn-child --cwd <dir> --title <short title> [--profile <profile>] [--skills a,b]` with the full child task piped on stdin, then stop without sending a final answer.',
             '- Example delegation command: `printf %s "$child_task" | "$AGENTD_CLI" spawn-child --cwd /path/to/work --title "short title" --skills bookkeeping,calendar`.',

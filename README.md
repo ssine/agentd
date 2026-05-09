@@ -176,10 +176,11 @@ After a restart it reconciles pending card/final-message updates and marks any l
 can no longer control as interrupted. Use `--defer` when you want to avoid interrupting an active turn:
 
 ```bash
-uv run agentd service restart --defer 10
+uv run agentd service restart --defer
 ```
 
-The CLI records a deferred restart request and the daemon applies it only after active runs finish.
+The CLI records a deferred restart request and the daemon applies it only after active runs, dirty cards, and
+Feishu outbox sends are idle. A bare `--defer` uses a 10 second minimum delay; pass `--defer 30` to override it.
 
 ## Development
 

@@ -25,7 +25,7 @@ This skill is built into agentd and is injected into every agentd-managed Codex 
 4. Prefer deferred restarts during active work:
 
 ```bash
-"$AGENTD_CLI" --config "$AGENTD_CONFIG" service restart --defer 10
+"$AGENTD_CLI" --config "$AGENTD_CONFIG" service restart --defer
 ```
 
 5. For machine-specific details, search the injected memory index first, then read only the relevant machine memory snippets.

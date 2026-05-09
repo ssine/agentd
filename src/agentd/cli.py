@@ -15,6 +15,9 @@ from .registry import Registry
 from .title import TITLE_DISPLAY_WIDTH, normalize_title
 
 
+DEFAULT_DEFER_SECONDS = 10.0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog='agentd')
     parser.add_argument('--config', help='path to agentd TOML config')
@@ -64,7 +67,15 @@ def main(argv: list[str] | None = None) -> int:
 
     service_restart = service_sub.add_parser('restart', parents=[service_common], help='restart agentd')
     service_restart.add_argument('--timeout', type=int, default=10)
-    service_restart.add_argument('--defer', type=float, default=0, help='schedule restart after N seconds')
+    service_restart.add_argument(
+        '--defer',
+        nargs='?',
+        const=DEFAULT_DEFER_SECONDS,
+        type=float,
+        default=0,
+        metavar='SECONDS',
+        help=f'schedule restart after daemon is idle; optional minimum delay defaults to {DEFAULT_DEFER_SECONDS:g}s',
+    )
 
     service_logs = service_sub.add_parser('logs', parents=[service_common], help='show service logs')
     service_logs.add_argument('--tail', type=int, default=120)
