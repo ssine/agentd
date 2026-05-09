@@ -1661,6 +1661,7 @@ class AgentDaemon:
                 [
                     '- Use `spawn-child` only for handoff: create a child thread, stop the current turn, and let the child take over the same work.',
                     '- Use `spawn-branch` for parallel work: create a child thread without interrupting the current turn.',
+                    '- If the user asks to open a child task/thread for work that should become the active discussion of the current topic, prefer `spawn-child` handoff over `spawn-branch`. For example, finding a wiki entry and continuing the discussion there is handoff, not parallel background work.',
                     '- If live user input is unrelated to the current task or explicitly asks for a new task, use `spawn-branch` instead of steering this turn or handing off.',
                     '- If you delegate or branch, do not call `set-title` in the parent session. Pipe the full child task to `"$AGENTD_CLI" spawn-child ...` or `"$AGENTD_CLI" spawn-branch ...`, then stop only for handoff.',
                     '- Example handoff: `printf %s "$child_task" | "$AGENTD_CLI" spawn-child --cwd /path/to/work --title "short title" --skills bookkeeping,calendar`.',
