@@ -2,12 +2,71 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from os import environ
 from pathlib import Path
+from unittest.mock import patch
 
-from agentd.config import load_config
+from agentd.config import default_config_path, load_config
 
 
 class ConfigTest(unittest.TestCase):
+    def test_default_config_path_uses_agentd_home_only(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_dir:
+            root = Path(raw_dir)
+            home = root / '.agentd'
+            repo_local_config = root / 'repo-local-config'
+            repo_local_config.mkdir()
+            (repo_local_config / 'agentd.toml').write_text('[agentd]\n', encoding='utf-8')
+
+            with patch.dict(environ, {'AGENTD_HOME': str(home)}):
+                self.assertEqual(default_config_path(), home / 'agentd.toml')
+
+    def test_feishu_legacy_codex_env_vars_are_ignored(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_dir:
+            root = Path(raw_dir)
+            home = root / '.agentd'
+            context_dir = root / 'agent-context'
+            home.mkdir()
+            context_dir.mkdir()
+            (context_dir / 'context.toml').write_text(
+                '\n'.join(
+                    [
+                        '[context]',
+                        'skill_roots = []',
+                        '',
+                        '[profiles.default]',
+                        'skills = []',
+                        '',
+                    ]
+                ),
+                encoding='utf-8',
+            )
+            config_path = home / 'agentd.toml'
+            config_path.write_text(
+                '\n'.join(
+                    [
+                        '[context]',
+                        f'dir = "{context_dir}"',
+                        '',
+                    ]
+                ),
+                encoding='utf-8',
+            )
+
+            with patch.dict(
+                environ,
+                {
+                    'AGENTD_FEISHU_APP_ID': '',
+                    'AGENTD_FEISHU_APP_SECRET': '',
+                    'CODEX_' + 'FEISHU_APP_ID': 'legacy-id',
+                    'CODEX_' + 'FEISHU_APP_SECRET': 'legacy-secret',
+                },
+            ):
+                config = load_config(config_path)
+
+            self.assertEqual(config.feishu.app_id, '')
+            self.assertEqual(config.feishu.app_secret, '')
+
     def test_home_state_and_external_context_paths(self) -> None:
         with tempfile.TemporaryDirectory() as raw_dir:
             root = Path(raw_dir)
@@ -106,7 +165,7 @@ class ConfigTest(unittest.TestCase):
     def test_workspace_relative_context_paths(self) -> None:
         with tempfile.TemporaryDirectory() as raw_dir:
             workspace = Path(raw_dir)
-            config_dir = workspace / '.agents/config'
+            config_dir = workspace / 'config'
             config_dir.mkdir(parents=True)
             (workspace / 'skills').mkdir()
             (config_dir / 'context-profiles.toml').write_text(
@@ -128,9 +187,9 @@ class ConfigTest(unittest.TestCase):
                     [
                         '[agentd]',
                         f'workspace = "{workspace}"',
-                        'runtime_dir = ".agents/runtime"',
-                        'context_profiles = ".agents/config/context-profiles.toml"',
-                        'schedules = ".agents/config/schedules.toml"',
+                        'runtime_dir = ".agentd-runtime"',
+                        'context_profiles = "config/context-profiles.toml"',
+                        'schedules = "config/schedules.toml"',
                         '',
                     ]
                 ),
@@ -140,7 +199,7 @@ class ConfigTest(unittest.TestCase):
             config = load_config(config_path)
 
             self.assertEqual(config.workspace, workspace)
-            self.assertEqual(config.runtime_dir, workspace / '.agents/runtime')
+            self.assertEqual(config.runtime_dir, workspace / '.agentd-runtime')
             self.assertEqual(config.context.path, config_dir / 'context-profiles.toml')
             self.assertEqual(config.context.skill_roots, (workspace / 'skills',))
 

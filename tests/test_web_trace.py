@@ -222,9 +222,7 @@ def write_exchange_files(
         request_headers += 'Content-Encoding: zstd\r\n'
     request_path = capture_dir / 'exchange-request.http'
     response_path = capture_dir / 'exchange-response.http'
-    request_path.write_bytes(
-        f'POST /v1/responses HTTP/1.1\r\n{request_headers}\r\n'.encode('utf-8') + request_body_bytes
-    )
+    request_path.write_bytes(f'POST /v1/responses HTTP/1.1\r\n{request_headers}\r\n'.encode() + request_body_bytes)
     response_path.write_bytes(
         b'HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n' + f'data: {json.dumps(completed)}\n\n'.encode()
     )
@@ -263,7 +261,7 @@ def write_stream_response_exchange_files(root: Path) -> tuple[Path, Path]:
     ]
     response_path.write_bytes(
         b'HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n'
-        + b''.join(f'data: {json.dumps(chunk)}\n\n'.encode('utf-8') for chunk in chunks)
+        + b''.join(f'data: {json.dumps(chunk)}\n\n'.encode() for chunk in chunks)
     )
     return request_path, response_path
 

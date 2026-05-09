@@ -18,8 +18,8 @@ from agentd.service import (
     read_startup_notice,
     service_notice_chat_id,
     startup_notice_path,
-    write_startup_notice,
     write_deferred_service_command,
+    write_startup_notice,
 )
 
 

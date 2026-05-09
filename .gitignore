@@ -6,7 +6,3 @@ __pycache__/
 dist/
 build/
 src/*.egg-info/
-.agents/runtime/
-.agents/config/agentd.toml
-.agents/config/machines.toml
-

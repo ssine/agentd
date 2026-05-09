@@ -2,6 +2,13 @@
 
 Local control plane for routing Feishu messages into persistent Codex app-server threads.
 
+## Prerequisites
+
+- `uv` installed and available on `PATH`.
+- A working Codex CLI/app-server command. The default config uses `codex`; verify it with `codex --version`, or pass `--codex-command /path/to/codex` during `agentd init`.
+- Feishu bot `app_id` and `app_secret` for the Feishu listener. The local web gateway can run without Feishu credentials.
+- Linux, WSL, or another environment that can run a long-lived Python process. `systemd --user` is optional; agentd falls back to a process backend for service management.
+
 ## Environment
 
 From this repository root:
@@ -11,6 +18,55 @@ uv sync --dev
 ```
 
 This creates `.venv/` and installs `lark-oapi` for the Feishu WebSocket listener.
+
+## Feishu App Setup
+
+Agentd uses a Feishu self-built app with bot capability. Users do not paste a
+`tenant_access_token`, `user_access_token`, verification token, encrypt key, or
+webhook URL into agentd. Configure these two values only:
+
+- `app_id`: Feishu app ID from "Credentials & Basic Info", shaped like `cli_xxx`.
+- `app_secret`: Feishu app secret from the same page, an opaque secret string.
+
+Put them in `~/.agentd/agentd.toml`, or provide them as environment variables:
+
+```bash
+export AGENTD_FEISHU_APP_ID=cli_xxx
+export AGENTD_FEISHU_APP_SECRET=xxx
+```
+
+Agentd exchanges those credentials for an internal tenant access token through
+Feishu's `tenant_access_token/internal` API at runtime.
+
+In Feishu Open Platform:
+
+1. Create a self-built app and add the Bot capability.
+2. In "Events & Callbacks", choose long connection/WebSocket event receiving.
+3. Subscribe to `im.message.receive_v1` ("Receive Message v2.0").
+4. Subscribe to `card.action.trigger` ("Card Action Interaction") so status-card buttons work.
+5. Add the required permissions, then create a version and publish it.
+
+Minimum permissions:
+
+| Permission | Why agentd needs it |
+| --- | --- |
+| `im:message:send_as_bot` | Send status cards and final replies as the bot. |
+| `im:message.p2p_msg:readonly` | Receive direct messages sent to the bot. |
+| `im:message.group_at_msg:readonly` | Receive group messages that mention the bot. |
+| `im:message:update` | Update the status card message in place. |
+
+Optional permissions:
+
+| Permission | When to enable |
+| --- | --- |
+| `im:message.group_msg` | Receive all group messages without requiring an @mention. This is broader than the default and may need admin approval. |
+| `contact:user.base:readonly` | Improve sender display names if your tenant does not include names in message events. Agentd does not call contact APIs by default. |
+| `im:resource` | Future media/file support. Current agentd only shows `[image]`, `[file]`, and `[audio]` placeholders. |
+
+Some Feishu tenants show a broader `im:message` permission instead of, or in
+addition to, granular message scopes. Prefer the granular scopes above when the
+console offers them. If card updates fail with a no-permission error, add or
+re-publish `im:message:update`.
 
 ## Setup
 
@@ -26,8 +82,11 @@ Help me set up agentd on this machine from the current cloned repository.
 
 Goals:
 - Install Python dependencies with uv.
+- Verify `codex --version`, or ask me for the Codex command path and pass it through `agentd init --codex-command`.
 - Run `uv run agentd --config ~/.agentd/agentd.toml init` to create ~/.agentd/agentd.toml and ~/agent-context if they do not exist.
 - Initialize context.toml, schedules.toml, CONTEXT.md, memory/MEMORY.md, memory/projects/, and skills/ through that command.
+- Ask me for my Feishu self-built app App ID and App Secret; explain that agentd needs app credentials, not a tenant_access_token or webhook secret.
+- Confirm the Feishu app has Bot capability, long-connection events `im.message.receive_v1` and `card.action.trigger`, and the permissions documented in README.
 - Keep secrets out of Git by default; use environment variables or tell me exactly where to edit app_id/app_secret.
 - Set agentd.source_dir to this repository path and agentd.executable to .venv/bin/agentd.
 - Run config-check and explain any missing values.
@@ -47,6 +106,7 @@ The recommended manual path is the init command:
 
 ```bash
 uv sync --dev
+codex --version
 uv run agentd --config ~/.agentd/agentd.toml init
 ```
 
@@ -117,6 +177,7 @@ Then validate the setup:
 uv sync --dev
 uv run agentd --config ~/.agentd/agentd.toml config-check
 uv run agentd --config ~/.agentd/agentd.toml simulate-message --chat-id local-p2p 'Reply exactly with: pong'
+uv run agentd --config ~/.agentd/agentd.toml service doctor
 ```
 
 After `config-check` is clean, run locally or install the service:

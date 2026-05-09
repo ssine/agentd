@@ -627,7 +627,7 @@ def launch_idle_service_command(
         '    try:\n'
         '        idle = Registry(db_path).idle_work_count() == 0\n'
         '    except Exception as exc:\n'
-        '        print(f\"waiting for agentd idle failed: {exc}\", flush=True)\n'
+        '        print(f"waiting for agentd idle failed: {exc}", flush=True)\n'
         '        idle = False\n'
         '    now = time.time()\n'
         '    if idle:\n'

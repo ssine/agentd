@@ -27,7 +27,6 @@ from .registry import Registry
 from .schedule import ScheduleJob, due_run_key
 from .title import normalize_title, title_from_text
 
-
 STATUS_TICK_SECONDS = 5
 STATUS_UPDATE_MIN_INTERVAL_SECONDS = 1
 FEISHU_SEND_MIN_INTERVAL_SECONDS = 1

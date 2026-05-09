@@ -16,7 +16,6 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10 fallback
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-LEGACY_CONFIG_PATH = PROJECT_ROOT / '.agents/config/agentd.toml'
 
 
 @dataclass(frozen=True)
@@ -114,12 +113,7 @@ def default_context_dir() -> Path:
 
 
 def default_config_path() -> Path:
-    home_config = default_home_dir() / 'agentd.toml'
-    if home_config.exists() or os.environ.get('AGENTD_HOME'):
-        return home_config
-    if LEGACY_CONFIG_PATH.exists():
-        return LEGACY_CONFIG_PATH
-    return home_config
+    return default_home_dir() / 'agentd.toml'
 
 
 def _load_toml(path: Path) -> dict[str, Any]:
@@ -225,9 +219,7 @@ def load_config(path: str | Path | None = None) -> AgentdConfig:
         home_dir,
     )
     workspace = (
-        _as_path(agentd_raw.get('workspace'), source_dir)
-        if agentd_raw.get('workspace') is not None
-        else context_dir
+        _as_path(agentd_raw.get('workspace'), source_dir) if agentd_raw.get('workspace') is not None else context_dir
     )
 
     if agentd_raw.get('state_dir') is not None:
@@ -254,9 +246,8 @@ def load_config(path: str | Path | None = None) -> AgentdConfig:
     schedules = load_schedule_config(schedules_path)
 
     feishu = FeishuConfig(
-        app_id=_env_first('AGENTD_FEISHU_APP_ID', 'CODEX_FEISHU_APP_ID') or str(feishu_raw.get('app_id') or ''),
-        app_secret=_env_first('AGENTD_FEISHU_APP_SECRET', 'CODEX_FEISHU_APP_SECRET')
-        or str(feishu_raw.get('app_secret') or ''),
+        app_id=_env_first('AGENTD_FEISHU_APP_ID') or str(feishu_raw.get('app_id') or ''),
+        app_secret=_env_first('AGENTD_FEISHU_APP_SECRET') or str(feishu_raw.get('app_secret') or ''),
         ignore_bot_messages=bool(feishu_raw.get('ignore_bot_messages', True)),
         main_reply_in_thread=bool(feishu_raw.get('main_reply_in_thread', False)),
         child_reply_in_thread=bool(feishu_raw.get('child_reply_in_thread', True)),
