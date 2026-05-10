@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import io
 import unittest
+import urllib.error
+from unittest import mock
 
 from agentd.feishu_registration import (
     FeishuAppRegistrationBegin,
@@ -95,6 +98,18 @@ class FeishuAppRegistrationClientTest(unittest.TestCase):
 
         with self.assertRaisesRegex(FeishuAppRegistrationError, 'denied'):
             FeishuAppRegistrationClient(request_form=request, sleep=lambda _: None).poll(begin)
+
+    def test_default_request_form_returns_poll_errors_from_http_error_body(self) -> None:
+        body = io.BytesIO(b'{"error":"authorization_pending"}')
+        error = urllib.error.HTTPError('https://accounts.feishu.cn', 400, 'Bad Request', {}, body)
+
+        with mock.patch('agentd.feishu_registration.urllib.request.urlopen', side_effect=error):
+            data = FeishuAppRegistrationClient._request_form_default(
+                'https://accounts.feishu.cn/oauth/v1/app/registration',
+                {'action': 'poll', 'device_code': 'dev'},
+            )
+
+        self.assertEqual(data, {'error': 'authorization_pending'})
 
 
 if __name__ == '__main__':
