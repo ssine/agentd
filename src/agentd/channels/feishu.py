@@ -30,6 +30,7 @@ class FeishuChannelAdapter:
                 'sender_type': message.sender_type,
                 'chat_type': message.chat_type,
             },
+            attachments=message.attachments,
         )
 
     def submit_message(self, envelope: ChannelEnvelope) -> ControlCommand:
@@ -42,6 +43,7 @@ class FeishuChannelAdapter:
             sender_ref=envelope.sender_ref,
             text=envelope.text,
             metadata={**envelope.metadata, 'sender_name': envelope.sender_name},
+            attachments=envelope.attachments,
         )
 
     def card_action(self, action: CardAction) -> ControlCommand:

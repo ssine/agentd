@@ -7,10 +7,11 @@ import time
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from .config import FeishuConfig
-from .models import CardAction, IncomingMessage
+from .models import CardAction, IncomingMessage, MessageAttachment
 
 FEISHU_API_BASE = 'https://open.feishu.cn/open-apis'
 MESSAGE_TEXT_LIMIT = 4000
@@ -40,11 +41,8 @@ def thread_id_from_result(result: dict[str, Any]) -> str:
 
 
 def message_text(message: Any) -> str:
-    raw = obj_get(message, 'content')
-    msg_type = obj_get(message, 'message_type') or obj_get(message, 'msg_type')
-    try:
-        content = json.loads(raw or '{}')
-    except json.JSONDecodeError:
+    msg_type, content, raw = _message_content(message)
+    if not isinstance(content, dict):
         return str(raw or '').strip()
 
     if msg_type == 'post':
@@ -59,15 +57,93 @@ def message_text(message: Any) -> str:
                     parts.append(node.get('text') or node.get('href') or '')
                 elif tag == 'at':
                     parts.append(f'@{node.get("user_name") or node.get("user_id") or ""}')
+                else:
+                    attachment = _attachment_from_node(node)
+                    if attachment is not None:
+                        parts.append(f'[{attachment.kind}]')
         return ''.join(parts).strip()
 
-    if msg_type == 'image':
-        return '[image]'
-    if msg_type == 'file':
-        return '[file]'
-    if msg_type == 'audio':
-        return '[audio]'
+    if msg_type in {'image', 'file', 'audio', 'media'}:
+        return f'[{msg_type}]'
     return str(content.get('text') or '').strip()
+
+
+def message_attachments(message: Any) -> tuple[MessageAttachment, ...]:
+    msg_type, content, _raw = _message_content(message)
+    if not isinstance(content, dict):
+        return ()
+
+    if msg_type in {'image', 'file', 'audio', 'media'}:
+        attachment = _attachment_from_mapping(content, kind=msg_type)
+        return (attachment,) if attachment is not None else ()
+    if msg_type != 'post':
+        return ()
+
+    body = content.get('zh_cn') or content.get('en_us') or content
+    attachments: list[MessageAttachment] = []
+    for line in body.get('content', []):
+        if not isinstance(line, list):
+            continue
+        for node in line:
+            if isinstance(node, dict):
+                attachment = _attachment_from_node(node)
+                if attachment is not None:
+                    attachments.append(attachment)
+    return tuple(attachments)
+
+
+def _message_content(message: Any) -> tuple[str, Any, str]:
+    raw = obj_get(message, 'content')
+    msg_type = str(obj_get(message, 'message_type') or obj_get(message, 'msg_type') or '')
+    try:
+        content = json.loads(raw or '{}')
+    except json.JSONDecodeError:
+        return msg_type, None, str(raw or '')
+    return msg_type, content, str(raw or '')
+
+
+def _attachment_from_node(node: dict[str, Any]) -> MessageAttachment | None:
+    tag = str(node.get('tag') or '')
+    if tag in {'img', 'image'}:
+        return _attachment_from_mapping(node, kind='image')
+    if tag in {'file', 'audio', 'media', 'video'}:
+        return _attachment_from_mapping(node, kind='media' if tag == 'video' else tag)
+    if node.get('file_key'):
+        return _attachment_from_mapping(node, kind='file')
+    if node.get('image_key'):
+        return _attachment_from_mapping(node, kind='image')
+    return None
+
+
+def _attachment_from_mapping(data: dict[str, Any], *, kind: str) -> MessageAttachment | None:
+    key = _attachment_key(data, kind=kind)
+    if not key:
+        return None
+    size = _attachment_size(data.get('file_size') or data.get('size'))
+    return MessageAttachment(
+        kind=kind,
+        key=key,
+        name=str(data.get('file_name') or data.get('name') or data.get('title') or ''),
+        mime_type=str(data.get('mime_type') or data.get('file_type') or ''),
+        size=size,
+    )
+
+
+def _attachment_key(data: dict[str, Any], *, kind: str) -> str:
+    if kind == 'image':
+        return str(data.get('image_key') or data.get('key') or data.get('file_key') or '')
+    if kind in {'file', 'audio', 'media'}:
+        return str(data.get('file_key') or data.get('key') or data.get('image_key') or '')
+    return str(data.get('key') or data.get('file_key') or data.get('image_key') or '')
+
+
+def _attachment_size(value: Any) -> int | None:
+    if value in (None, ''):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def sender_name(event: Any, sender_open_id: str) -> str:
@@ -82,7 +158,8 @@ def parse_incoming(data: Any) -> IncomingMessage | None:
         return None
 
     text = message_text(message)
-    if not text:
+    attachments = message_attachments(message)
+    if not text and not attachments:
         return None
 
     sender_open_id = str(obj_get(sender, 'sender_id', 'open_id') or '')
@@ -95,6 +172,7 @@ def parse_incoming(data: Any) -> IncomingMessage | None:
         sender_type=str(obj_get(sender, 'sender_type') or ''),
         thread_id=str(obj_get(message, 'thread_id') or ''),
         chat_type=str(obj_get(message, 'chat_type') or ''),
+        attachments=attachments,
     )
 
 
@@ -215,6 +293,29 @@ class FeishuApi:
             {'Authorization': f'Bearer {self._tenant_access_token()}'},
         )
 
+    def download_message_resource(
+        self,
+        message_id: str,
+        file_key: str,
+        resource_type: str,
+        destination: Path,
+    ) -> Path:
+        if not self.config.app_id or not self.config.app_secret:
+            raise RuntimeError('missing Feishu app_id/app_secret')
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        message_id_path = urllib.parse.quote(message_id, safe='')
+        file_key_path = urllib.parse.quote(file_key, safe='')
+        resource_type_query = urllib.parse.quote(resource_type, safe='')
+        url = (
+            f'{FEISHU_API_BASE}/im/v1/messages/{message_id_path}/resources/'
+            f'{file_key_path}?type={resource_type_query}'
+        )
+        raw = self._request_binary('GET', url, {'Authorization': f'Bearer {self._tenant_access_token()}'})
+        tmp = destination.with_name(destination.name + '.tmp')
+        tmp.write_bytes(raw)
+        tmp.replace(destination)
+        return destination
+
     def _tenant_access_token(self) -> str:
         now = int(time.time())
         if self._token and self._token_expires_at > now + 60:
@@ -257,6 +358,25 @@ class FeishuApi:
     @classmethod
     def _post_json(cls, url: str, payload: dict[str, Any], headers: dict[str, str] | None = None) -> dict[str, Any]:
         return cls._request_json('POST', url, payload, headers)
+
+    @staticmethod
+    def _request_binary(method: str, url: str, headers: dict[str, str] | None = None) -> bytes:
+        request_headers: dict[str, str] = {}
+        if headers:
+            request_headers.update(headers)
+        req = urllib.request.Request(url, headers=request_headers, method=method)
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            raw = resp.read()
+            content_type = resp.headers.get('Content-Type', '')
+        if 'json' in content_type.lower():
+            try:
+                result = json.loads(raw.decode('utf-8', errors='replace'))
+            except json.JSONDecodeError:
+                result = {}
+            code = result.get('code') or result.get('StatusCode')
+            if code not in (None, 0):
+                raise RuntimeError(f'Feishu API returned code={code!r}: {raw[:500]!r}')
+        return raw
 
 
 class FeishuListener:

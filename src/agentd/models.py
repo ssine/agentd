@@ -5,6 +5,17 @@ from typing import Any
 
 
 @dataclass(frozen=True)
+class MessageAttachment:
+    kind: str
+    key: str
+    name: str = ''
+    mime_type: str = ''
+    size: int | None = None
+    local_path: str = ''
+    download_error: str = ''
+
+
+@dataclass(frozen=True)
 class IncomingMessage:
     chat_id: str
     message_id: str
@@ -15,6 +26,7 @@ class IncomingMessage:
     thread_id: str = ''
     chat_type: str = ''
     channel: str = 'feishu'
+    attachments: tuple[MessageAttachment, ...] = ()
 
 
 @dataclass(frozen=True)

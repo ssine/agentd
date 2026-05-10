@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from ..models import MessageAttachment
+
 
 @dataclass(frozen=True)
 class ChannelCapabilities:
@@ -24,6 +26,7 @@ class ChannelEnvelope:
     sender_name: str = ''
     thread_ref: str = ''
     metadata: dict[str, Any] = field(default_factory=dict)
+    attachments: tuple[MessageAttachment, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -36,6 +39,7 @@ class ControlCommand:
     thread_ref: str = ''
     sender_ref: str = ''
     metadata: dict[str, Any] = field(default_factory=dict)
+    attachments: tuple[MessageAttachment, ...] = ()
 
 
 @dataclass(frozen=True)

@@ -255,4 +255,5 @@ def message_from_control_command(command: ControlCommand) -> IncomingMessage:
         thread_id=command.thread_ref,
         chat_type=str(command.metadata.get('chat_type') or command.channel),
         channel=command.channel,
+        attachments=command.attachments,
     )

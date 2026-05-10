@@ -4,6 +4,7 @@ import unittest
 
 from agentd.channels import ControlCommand
 from agentd.daemon import message_from_control_command
+from agentd.models import MessageAttachment
 
 
 class ControlCommandTest(unittest.TestCase):
@@ -17,6 +18,7 @@ class ControlCommandTest(unittest.TestCase):
             sender_ref='ou_user',
             text='hello',
             metadata={'sender_name': 'Sine', 'sender_type': 'user', 'chat_type': 'group'},
+            attachments=(MessageAttachment(kind='file', key='file_1', local_path='/tmp/file.txt'),),
         )
 
         message = message_from_control_command(command)
@@ -27,6 +29,7 @@ class ControlCommandTest(unittest.TestCase):
         self.assertEqual(message.sender_name, 'Sine')
         self.assertEqual(message.chat_type, 'group')
         self.assertEqual(message.channel, 'feishu')
+        self.assertEqual(message.attachments, command.attachments)
 
     def test_wecom_submit_command_gets_channel_scoped_legacy_ids(self) -> None:
         command = ControlCommand(

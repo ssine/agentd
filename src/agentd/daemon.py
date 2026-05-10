@@ -32,6 +32,7 @@ from .models import (
     AgentSession,
     CardAction,
     IncomingMessage,
+    MessageAttachment,
     RunRecord,
     SpawnRequest,
     TitleRequest,
@@ -513,9 +514,50 @@ class AgentDaemon:
         return coordinator
 
     def handle_message(self, message: IncomingMessage) -> str:
+        message = self._prepare_message_attachments(message)
         adapter = FeishuChannelAdapter()
         command = adapter.submit_message(adapter.envelope_from_message(message))
         return self.handle_control_command(command)
+
+    def _prepare_message_attachments(self, message: IncomingMessage) -> IncomingMessage:
+        if channel_from_message(message) != 'feishu' or not message.attachments:
+            return message
+        attachments: list[MessageAttachment] = []
+        for index, attachment in enumerate(message.attachments, start=1):
+            if attachment.local_path or attachment.download_error or not attachment.key:
+                attachments.append(attachment)
+                continue
+            resource_type = _attachment_resource_type(attachment)
+            if resource_type is None:
+                attachments.append(attachment)
+                continue
+            destination = self._attachment_destination(message, attachment, index)
+            try:
+                self.feishu.download_message_resource(
+                    message.message_id,
+                    attachment.key,
+                    resource_type,
+                    destination,
+                )
+                attachments.append(replace(attachment, local_path=str(destination)))
+            except Exception as exc:
+                self.log.exception(
+                    'failed to download Feishu attachment %s from message %s',
+                    attachment.key,
+                    message.message_id,
+                )
+                attachments.append(replace(attachment, download_error=str(exc)))
+        return replace(message, attachments=tuple(attachments))
+
+    def _attachment_destination(
+        self,
+        message: IncomingMessage,
+        attachment: MessageAttachment,
+        index: int,
+    ) -> Path:
+        message_dir = self.config.state_dir / 'attachments' / _safe_path_part(message.message_id or 'unknown')
+        filename = _attachment_filename(attachment, index)
+        return message_dir / filename
 
     def handle_control_command(self, command: ControlCommand) -> str:
         return self.core.handle_control_command(command)
@@ -858,6 +900,51 @@ class AgentDaemon:
 
 def is_web_run(run: RunRecord) -> bool:
     return channel_from_legacy_run(run) == 'web'
+
+
+def _attachment_filename(attachment: MessageAttachment, index: int) -> str:
+    name = attachment.name.strip() or f'{attachment.kind}-{index}'
+    name = Path(name).name or f'{attachment.kind}-{index}'
+    if not Path(name).suffix:
+        suffix = _attachment_default_suffix(attachment)
+        if suffix:
+            name = f'{name}{suffix}'
+    return f'{index:02d}-{_safe_path_part(name)}'
+
+
+def _attachment_resource_type(attachment: MessageAttachment) -> str | None:
+    if attachment.kind == 'image':
+        return 'image'
+    if attachment.kind in {'file', 'audio', 'media'}:
+        return 'file'
+    return None
+
+
+def _attachment_default_suffix(attachment: MessageAttachment) -> str:
+    mime = attachment.mime_type.lower()
+    if mime == 'video/mp4':
+        return '.mp4'
+    if mime == 'audio/mpeg':
+        return '.mp3'
+    if mime in {'audio/ogg', 'audio/opus'}:
+        return '.opus'
+    if mime == 'application/pdf':
+        return '.pdf'
+    if attachment.kind == 'image':
+        return '.jpg'
+    if attachment.kind == 'media':
+        return '.mp4'
+    if attachment.kind == 'audio':
+        return '.opus'
+    return ''
+
+
+def _safe_path_part(value: str) -> str:
+    cleaned = ''.join(ch if ch.isprintable() and ch not in '/\\:*?"<>|' else '_' for ch in value)
+    cleaned = cleaned.strip(' .')
+    if cleaned:
+        return cleaned[:160]
+    return hashlib.sha256(value.encode('utf-8', errors='ignore')).hexdigest()[:16] or 'attachment'
 
 
 is_retryable_codex_error_event = is_retryable_runner_error_event

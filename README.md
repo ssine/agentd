@@ -74,7 +74,7 @@ Optional permissions:
 | --- | --- |
 | `im:message.group_msg` | Receive all group messages without requiring an @mention. This is broader than the default and may need admin approval. |
 | `contact:user.base:readonly` | Improve sender display names if your tenant does not include names in message events. Agentd does not call contact APIs by default. |
-| `im:resource` | Future media/file support. Current agentd only shows `[image]`, `[file]`, and `[audio]` placeholders. |
+| `im:resource` | Download image, audio, video, and file resources attached to received messages so Codex can inspect them from local paths. |
 
 Some Feishu tenants show a broader `im:message` permission instead of, or in
 addition to, granular message scopes. Prefer the granular scopes above when the
@@ -242,6 +242,7 @@ Agentd-owned runtime state is stored under the configured `state_dir`:
 - `agentd.pid`: pid for the fallback process supervisor.
 - `logs/`: per-turn Codex app-server JSON-RPC logs.
 - `logs/agentd-service.log`: stdout/stderr for the fallback process supervisor.
+- `attachments/`: downloaded Feishu image/file resources, grouped by source message ID.
 - `captures/responses/`: raw Responses API captures when `codex.capture.enabled = true`; the current archive period stays as loose `.http` files and completed periods are compacted into `.tar.zst`.
 - `captures/otel/`: Codex OpenTelemetry exports when `codex.otel.enabled = true`; OTLP JSON is stored as `.otlp.jsonl`, OTLP protobuf as `.otlp.pb`, and completed periods are compacted into `.tar.zst`.
 

@@ -7,7 +7,7 @@ from pathlib import Path
 from agentd.active_run import ActiveRun
 from agentd.config import AgentdConfig, CodexConfig, FeishuConfig, WebConfig
 from agentd.context import ContextConfig, ContextProfile, ContextPromptFile, ResolvedContext, SkillInfo
-from agentd.models import AgentSession, IncomingMessage, RunRecord
+from agentd.models import AgentSession, IncomingMessage, MessageAttachment, RunRecord
 from agentd.run_context import RunContextBuilder, RunnerContextBuilder
 from agentd.runners import AgentRunControl
 from agentd.schedule import ScheduleConfig
@@ -33,6 +33,38 @@ class RunContextBuilderTest(unittest.TestCase):
             self.assertIn('[Web Message]', prompt)
             self.assertIn('- agentd_session_id: 7', prompt)
             self.assertIn('Sine: hello from web', prompt)
+
+    def test_message_prompt_includes_downloaded_attachments(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_dir:
+            root = Path(raw_dir)
+            builder = make_builder(root, runner_kind='codex', runner_label='Codex')
+            session = make_session()
+            message = IncomingMessage(
+                chat_id='chat-1',
+                message_id='msg-1',
+                text='see attached',
+                sender_open_id='ou_1',
+                sender_name='Sine',
+                attachments=(
+                    MessageAttachment(
+                        kind='image',
+                        key='img_1',
+                        name='photo.jpg',
+                        mime_type='image/jpeg',
+                        size=42,
+                        local_path='/state/attachments/msg-1/photo.jpg',
+                    ),
+                ),
+            )
+
+            prompt = builder.message_prompt(message, session)
+
+            self.assertIn('Attachments:', prompt)
+            self.assertIn('type=image', prompt)
+            self.assertIn('name=photo.jpg', prompt)
+            self.assertIn('mime_type=image/jpeg', prompt)
+            self.assertIn('size=42', prompt)
+            self.assertIn('local_path=/state/attachments/msg-1/photo.jpg', prompt)
 
     def test_runner_context_builds_env_and_developer_instructions(self) -> None:
         with tempfile.TemporaryDirectory() as raw_dir:

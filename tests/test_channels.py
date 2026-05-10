@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 
 from agentd.channels import FeishuChannelAdapter, WebChannelAdapter, WeComChannelAdapter
-from agentd.models import CardAction, IncomingMessage
+from agentd.models import CardAction, IncomingMessage, MessageAttachment
 
 
 class ChannelAdapterTest(unittest.TestCase):
@@ -18,6 +18,7 @@ class ChannelAdapterTest(unittest.TestCase):
             sender_type='user',
             chat_type='group',
             text='hello',
+            attachments=(MessageAttachment(kind='image', key='img_1', local_path='/tmp/img.jpg'),),
         )
 
         command = adapter.submit_message(adapter.envelope_from_message(message))
@@ -28,6 +29,7 @@ class ChannelAdapterTest(unittest.TestCase):
         self.assertEqual(command.channel, 'feishu')
         self.assertEqual(command.thread_ref, 'thread-1')
         self.assertEqual(command.sender_ref, 'ou_user')
+        self.assertEqual(command.attachments, message.attachments)
         self.assertEqual(action.metadata['action'], 'stop')
         self.assertEqual(action.metadata['session_id'], 42)
 

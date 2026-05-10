@@ -26,18 +26,23 @@ class RunContextBuilder:
         sender = message.sender_name or message.sender_open_id or 'unknown'
         thread_id = message.thread_id or 'none'
         channel = channel_from_message(message)
-        return '\n'.join(
-            [
-                f'[{channel_label(channel)} Message]',
-                f'- sender: {sender} (open_id: {message.sender_open_id or "unknown"})',
-                f'- chat_id: {message.chat_id}',
-                f'- message_id: {message.message_id}',
-                f'- thread_id: {thread_id}',
-                f'- agentd_session_id: {session.id}',
-                '',
-                f'{sender}: {message.text}',
-            ]
-        )
+        lines = [
+            f'[{channel_label(channel)} Message]',
+            f'- sender: {sender} (open_id: {message.sender_open_id or "unknown"})',
+            f'- chat_id: {message.chat_id}',
+            f'- message_id: {message.message_id}',
+            f'- thread_id: {thread_id}',
+            f'- agentd_session_id: {session.id}',
+            '',
+            f'{sender}: {message.text}',
+        ]
+        lines.extend(message_attachment_prompt_lines(message))
+        return '\n'.join(lines)
+
+    def live_input_prompt(self, message: IncomingMessage) -> str:
+        lines = [message.text.strip()]
+        lines.extend(message_attachment_prompt_lines(message))
+        return '\n'.join(line for line in lines if line)
 
     def child_prompt(self, request: SpawnRequest, session: AgentSession, source_message_id: str) -> str:
         return '\n'.join(
@@ -176,6 +181,32 @@ class RunContextBuilder:
             'AGENTD_CONTEXT_SKILLS': ','.join(context_skills),
             'AGENTD_MEMORY_DIR': str(self.context_resolver.memory_dir),
         }
+
+
+def message_attachment_prompt_lines(message: IncomingMessage) -> list[str]:
+    if not message.attachments:
+        return []
+    lines = [
+        '',
+        'Attachments:',
+        'The sender attached file/image resources. Downloaded resources are available on the local filesystem.',
+    ]
+    for index, attachment in enumerate(message.attachments, start=1):
+        detail = [f'- {index}. type={attachment.kind}']
+        if attachment.name:
+            detail.append(f'name={attachment.name}')
+        if attachment.mime_type:
+            detail.append(f'mime_type={attachment.mime_type}')
+        if attachment.size is not None:
+            detail.append(f'size={attachment.size}')
+        if attachment.local_path:
+            detail.append(f'local_path={attachment.local_path}')
+        if attachment.download_error:
+            detail.append(f'download_error={attachment.download_error}')
+        elif not attachment.local_path:
+            detail.append('local_path=unavailable')
+        lines.append(' '.join(detail))
+    return lines
 
 
 class RunnerContextBuilder:
