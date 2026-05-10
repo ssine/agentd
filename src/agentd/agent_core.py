@@ -6,6 +6,7 @@ from typing import Any
 
 from .active_run import ActiveRun
 from .channels.base import ControlCommand
+from .codex_usage import CodexUsageError, format_codex_usage, format_codex_usage_error, read_codex_usage
 from .models import CardAction, IncomingMessage, RunRecord
 from .title import normalize_title, title_from_text
 
@@ -28,6 +29,8 @@ class AgentCore:
         if owner.registry.is_duplicate(message.message_id):
             owner.log.info('duplicate message ignored: %s', message.message_id)
             return ''
+        if is_codex_usage_command(message.text):
+            return self.handle_codex_usage_command(message)
 
         session = owner._resolve_session(message)
         if session is None:
@@ -149,8 +152,10 @@ class AgentCore:
 
     def handle_live_input(self, active: ActiveRun, message: IncomingMessage) -> str:
         owner = self.owner
-        text = message.text.strip()
-        lower = text.lower()
+        raw_text = message.text.strip()
+        lower = raw_text.lower()
+        if is_codex_usage_command(raw_text):
+            return self.handle_codex_usage_command(message)
         if lower in {'/status', 'status', '状态', '看看状态'}:
             owner._publish_status(active, force=True, create=True)
             return 'status'
@@ -159,16 +164,16 @@ class AgentCore:
             if ok:
                 owner.registry.update_run(active.run_id, state='cancel_requested', status='已请求停止')
                 owner._add_model_message(active, '用户请求停止当前 turn。', phase='control')
-                owner._publish_status(active, force=True, create=True)
             else:
                 owner.registry.update_run(active.run_id, status=f'停止失败: {detail}')
-                owner._publish_status(active, force=True, create=True)
+            owner._publish_status(active, force=True, create=True)
             return detail
 
-        branch_command = parse_live_branch_command(text)
+        branch_command = parse_live_branch_command(raw_text)
         if branch_command is not None:
             return self.handle_live_branch_command(active, message, branch_command)
 
+        text = owner.run_context_builder.live_input_prompt(message)
         ok, detail = active.control.steer(text)
         if ok:
             owner.registry.update_run(active.run_id, status='已追加指令')
@@ -225,6 +230,42 @@ class AgentCore:
         owner._add_model_message(active, f'{status}：{title}', phase='control')
         owner._publish_status(active, force=True, create=True)
         return f'{status}: {request_id}'
+
+    def handle_codex_usage_command(self, message: IncomingMessage) -> str:
+        owner = self.owner
+        try:
+            text = format_codex_usage(read_codex_usage(owner.config))
+        except CodexUsageError as exc:
+            text = format_codex_usage_error(exc)
+        reply = getattr(owner, '_send_direct_reply', None)
+        if callable(reply):
+            reply(message, text)
+        return text
+
+
+def is_codex_usage_command(text: str) -> bool:
+    normalized = ' '.join(text.strip().lower().split())
+    compact = normalized.replace(' ', '')
+    return normalized in {
+        '/quota',
+        '/usage',
+        '/limits',
+        '/codex-usage',
+        'codex quota',
+        'codex usage',
+        'codex limits',
+        '查额度',
+        '查询额度',
+        '查一下额度',
+        '查询 codex 额度',
+        '查 codex 额度',
+    } or compact in {
+        'codex额度',
+        'codex使用额度',
+        'codex剩余额度',
+        '查询codex额度',
+        '查codex额度',
+    }
 
 
 def parse_live_branch_command(text: str) -> dict[str, str] | None:

@@ -562,6 +562,23 @@ class AgentDaemon:
     def handle_control_command(self, command: ControlCommand) -> str:
         return self.core.handle_control_command(command)
 
+    def _send_direct_reply(self, message: IncomingMessage, text: str) -> None:
+        channel = channel_from_message(message)
+        if channel == 'feishu':
+            if self.dry_send:
+                print(text)
+                return
+            self._wait_for_feishu_send_slot()
+            if message.message_id:
+                self.feishu.reply_markdown(
+                    message.message_id,
+                    text,
+                    reply_in_thread=self.config.feishu.child_reply_in_thread,
+                )
+            elif message.chat_id:
+                self.feishu.send_markdown(message.chat_id, text)
+            self._last_feishu_send_at = time.monotonic()
+
     def _handle_submit_message(self, message: IncomingMessage) -> str:
         return self.core.handle_submit_message(message)
 

@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from agentd.cli import main
+from agentd.codex_usage import CodexLimitSnapshot, CodexUsageSnapshot, UsageWindow
 
 
 class CliTest(unittest.TestCase):
@@ -172,6 +173,50 @@ class CliTest(unittest.TestCase):
             self.assertEqual(result, 0)
             args = service_command.call_args.args[1]
             self.assertEqual(args.defer, 30.0)
+
+    def test_codex_usage_command_prints_human_output(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_dir:
+            root = Path(raw_dir)
+            config = SimpleNamespace(state_dir=root / 'state', log_dir=root / 'logs', log_level='CRITICAL')
+
+            stdout = StringIO()
+            with (
+                patch('agentd.cli.load_config', return_value=config),
+                patch('agentd.cli.read_codex_usage', return_value=make_usage_snapshot()),
+                redirect_stdout(stdout),
+            ):
+                result = main(['--config', str(root / 'agentd.toml'), 'codex-usage'])
+
+            self.assertEqual(result, 0)
+            self.assertIn('当前计划：Pro，当前未触发限额。', stdout.getvalue())
+            self.assertIn('5 小时窗口：已用 5%，剩余 95%', stdout.getvalue())
+
+    def test_codex_usage_command_can_print_json(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_dir:
+            root = Path(raw_dir)
+            config = SimpleNamespace(state_dir=root / 'state', log_dir=root / 'logs', log_level='CRITICAL')
+
+            stdout = StringIO()
+            with (
+                patch('agentd.cli.load_config', return_value=config),
+                patch('agentd.cli.read_codex_usage', return_value=make_usage_snapshot()),
+                redirect_stdout(stdout),
+            ):
+                result = main(['--config', str(root / 'agentd.toml'), 'codex-usage', '--json'])
+
+            self.assertEqual(result, 0)
+            self.assertIn('"plan_type": "pro"', stdout.getvalue())
+            self.assertIn('"remaining_percent": 95.0', stdout.getvalue())
+
+def make_usage_snapshot() -> CodexUsageSnapshot:
+    main = CodexLimitSnapshot(
+        limit_id='codex',
+        limit_name='',
+        plan_type='pro',
+        primary=UsageWindow(used_percent=5, window_duration_mins=300, resets_at=1778410334),
+        secondary=UsageWindow(used_percent=17, window_duration_mins=10080, resets_at=1778857837),
+    )
+    return CodexUsageSnapshot(queried_at=1778401473, rate_limits=main, rate_limits_by_limit_id={'codex': main})
 
 
 if __name__ == '__main__':

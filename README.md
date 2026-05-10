@@ -225,6 +225,7 @@ Important path defaults:
 
 ```bash
 uv run agentd config-check
+uv run agentd codex-usage
 uv run agentd simulate-message --chat-id local-p2p 'Reply exactly with: pong'
 uv run agentd serve # also starts the local web gateway when [web].enabled = true
 uv run agentd web --host 127.0.0.1 --port 8765
@@ -340,6 +341,10 @@ When a main-chat turn is already running, users can also send `/branch <task>`
 to start a parallel child task, or `/thread [title]` to create an empty Feishu
 thread card in the main chat that starts Codex when the first message is posted
 inside it.
+
+Users can send `/quota`, `/usage`, `/limits`, or `/codex-usage` to ask agentd
+for the current Codex account rate-limit percentages. The same check is
+available from the shell as `agentd codex-usage`.
 
 ## Service Management
 

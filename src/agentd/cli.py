@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import sys
 import time
 from pathlib import Path
 
+from .codex_usage import CodexUsageError, format_codex_usage, read_codex_usage, snapshot_to_dict
 from .config import (
     PROJECT_ROOT,
     AgentdConfig,
@@ -79,6 +81,9 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser('config-check', help='check config without printing secrets')
 
+    codex_usage = sub.add_parser('codex-usage', help='show Codex account usage and rate-limit windows')
+    codex_usage.add_argument('--json', action='store_true', help='print machine-readable JSON')
+
     service = sub.add_parser('service', help='manage the agentd service process')
     service_sub = service.add_subparsers(dest='service_command', required=True)
     service_common = argparse.ArgumentParser(add_help=False)
@@ -127,6 +132,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == 'config-check':
         return config_check(config)
+    if args.command == 'codex-usage':
+        return codex_usage_request(config, args)
     if args.command == 'service':
         from .service import service_command
 
@@ -346,6 +353,19 @@ def config_check(config: AgentdConfig) -> int:
         print(f'missing={",".join(missing)}')
         return 2
     print('ok')
+    return 0
+
+
+def codex_usage_request(config: AgentdConfig, args: argparse.Namespace) -> int:
+    try:
+        snapshot = read_codex_usage(config)
+    except CodexUsageError as exc:
+        print(f'failed to read Codex usage: {exc}', file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(snapshot_to_dict(snapshot), ensure_ascii=False, sort_keys=True))
+    else:
+        print(format_codex_usage(snapshot))
     return 0
 
 
