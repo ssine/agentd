@@ -10,7 +10,6 @@ from pathlib import Path
 from .config import (
     PROJECT_ROOT,
     AgentdConfig,
-    default_context_dir,
     default_home_dir,
     load_config,
 )
@@ -173,7 +172,7 @@ def init_request(args: argparse.Namespace) -> int:
     from .bootstrap import BootstrapOptions, init_agentd, write_feishu_credentials
 
     home_dir = Path(args.home_dir).expanduser().resolve() if args.home_dir else default_home_dir()
-    context_dir = Path(args.context_dir).expanduser().resolve() if args.context_dir else default_context_dir()
+    context_dir = Path(args.context_dir).expanduser().resolve() if args.context_dir else home_dir / 'context'
     source_dir = Path(args.source_dir).expanduser().resolve() if args.source_dir else PROJECT_ROOT
     config_path = Path(args.config).expanduser().resolve() if args.config else home_dir / 'agentd.toml'
     feishu_app_id = ''

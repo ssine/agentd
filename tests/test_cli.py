@@ -43,7 +43,6 @@ class CliTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw_dir:
             root = Path(raw_dir)
             home_dir = root / 'home'
-            context_dir = root / 'context'
             source_dir = root / 'agentd'
 
             with redirect_stdout(StringIO()):
@@ -52,8 +51,6 @@ class CliTest(unittest.TestCase):
                         'init',
                         '--home-dir',
                         str(home_dir),
-                        '--context-dir',
-                        str(context_dir),
                         '--source-dir',
                         str(source_dir),
                         '--runner-kind',
@@ -64,6 +61,7 @@ class CliTest(unittest.TestCase):
             self.assertEqual(result, 0)
             config_path = home_dir / 'agentd.toml'
             self.assertTrue(config_path.is_file())
+            self.assertTrue((home_dir / 'context' / 'context.toml').is_file())
             self.assertIn('kind = "claude_code"', config_path.read_text(encoding='utf-8'))
 
     def test_init_create_feishu_app_writes_credentials_without_printing_secret(self) -> None:
