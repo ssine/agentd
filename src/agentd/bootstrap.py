@@ -229,7 +229,7 @@ prompt_files = ["CONTEXT.md", "memory/MEMORY.md"]
 prompt_file_max_bytes = 65536
 
 [profiles.default]
-skills = []
+skills = ["*"]
 memory = "rg"
 """
 
