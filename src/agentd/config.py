@@ -126,7 +126,10 @@ def default_home_dir() -> Path:
 
 
 def default_context_dir() -> Path:
-    return Path(os.environ.get('AGENTD_CONTEXT_HOME') or '~/agent-context').expanduser().resolve()
+    raw = os.environ.get('AGENTD_CONTEXT_HOME')
+    if raw:
+        return Path(raw).expanduser().resolve()
+    return (default_home_dir() / 'context').resolve()
 
 
 def default_config_path() -> Path:

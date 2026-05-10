@@ -6,7 +6,7 @@ from os import environ
 from pathlib import Path
 from unittest.mock import patch
 
-from agentd.config import default_config_path, load_config
+from agentd.config import default_config_path, default_context_dir, load_config
 
 
 class ConfigTest(unittest.TestCase):
@@ -20,6 +20,13 @@ class ConfigTest(unittest.TestCase):
 
             with patch.dict(environ, {'AGENTD_HOME': str(home)}):
                 self.assertEqual(default_config_path(), home / 'agentd.toml')
+
+    def test_default_context_dir_lives_under_agentd_home(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_dir:
+            home = Path(raw_dir) / '.agentd'
+
+            with patch.dict(environ, {'AGENTD_HOME': str(home), 'AGENTD_CONTEXT_HOME': ''}, clear=False):
+                self.assertEqual(default_context_dir(), home / 'context')
 
     def test_feishu_legacy_codex_env_vars_are_ignored(self) -> None:
         with tempfile.TemporaryDirectory() as raw_dir:

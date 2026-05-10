@@ -10,7 +10,7 @@ log_level = "INFO"
 
 [context]
 # User-maintained context can live outside AGENTD_HOME and can be a separate git repo.
-dir = "~/agent-context"
+dir = "~/.agentd/context"
 config = "context.toml"
 schedules = "schedules.toml"
 # The context config defaults to injecting CONTEXT.md and memory/MEMORY.md into Codex prompts.

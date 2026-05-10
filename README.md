@@ -6,7 +6,7 @@ Local control plane for routing Feishu messages into persistent Codex app-server
 
 - `uv` installed and available on `PATH`.
 - A working Codex CLI/app-server command. The default config uses `codex`; verify it with `codex --version`, or pass `--codex-command /path/to/codex` during `agentd init`.
-- Feishu bot `app_id` and `app_secret` for the Feishu listener. The local web gateway can run without Feishu credentials.
+- Feishu bot `app_id` and `app_secret` for the Feishu listener. `agentd init --create-feishu-app` can create a new Feishu agent app and save these credentials after browser confirmation. The local web gateway can run without Feishu credentials.
 - Linux, WSL, or another environment that can run a long-lived Python process. `systemd --user` is optional; agentd falls back to a process backend for service management.
 
 ## Environment
@@ -21,7 +21,18 @@ This creates `.venv/` and installs `lark-oapi` for the Feishu WebSocket listener
 
 ## Feishu App Setup
 
-Agentd uses a Feishu self-built app with bot capability. Users do not paste a
+Agentd uses a Feishu self-built app with bot capability. The guided setup can
+create a Feishu "智能体应用" and save `app_id` / `app_secret`:
+
+```bash
+uv run agentd --config ~/.agentd/agentd.toml init --create-feishu-app
+```
+
+The command prints a Feishu confirmation URL, waits for the user to approve app
+creation in the browser, then saves the returned credentials to
+`~/.agentd/agentd.toml` without printing the secret.
+
+Users do not paste a
 `tenant_access_token`, `user_access_token`, verification token, encrypt key, or
 webhook URL into agentd. Configure these two values only:
 
@@ -38,7 +49,7 @@ export AGENTD_FEISHU_APP_SECRET=xxx
 Agentd exchanges those credentials for an internal tenant access token through
 Feishu's `tenant_access_token/internal` API at runtime.
 
-In Feishu Open Platform:
+After the app exists, finish these items in Feishu Open Platform:
 
 1. Open <https://open.feishu.cn/app> and create a Feishu "智能体应用" / self-built app.
 2. Add the Bot capability.
@@ -74,28 +85,26 @@ re-publish `im:message:update`.
 
 There are two supported setup paths:
 
-- Agent-guided setup: paste the prompt below into Codex from this repository root and let the agent run `agentd init`, validate config, and guide service installation.
+- Agent-guided setup: ask Codex to configure `https://github.com/ssine/agentd`; it should clone/open this repository, run `agentd init --create-feishu-app`, validate config, and guide service installation.
 - Manual setup: run `agentd init` yourself, or create the same files by hand.
 
 Agent-guided setup prompt:
 
 ```text
-Help me set up agentd on this machine from the current cloned repository.
+Please configure https://github.com/ssine/agentd on this machine.
 
 Goals:
+- Clone the repository if needed, then work from the repository root.
 - Install Python dependencies with uv.
 - Verify `codex --version`, or ask me for the Codex command path and pass it through `agentd init --codex-command`.
-- Run `uv run agentd --config ~/.agentd/agentd.toml init` to create ~/.agentd/agentd.toml and ~/agent-context if they do not exist.
+- Ask me where to store agentd context. Recommend `~/.agentd/context` unless I already have a private context repo I want to use.
+- Run `uv run agentd --config ~/.agentd/agentd.toml init --create-feishu-app` with the selected `--context-dir` to create ~/.agentd/agentd.toml and the context skeleton if they do not exist.
 - Initialize context.toml, schedules.toml, CONTEXT.md, memory/MEMORY.md, memory/projects/, and skills/ through that command.
-- Ask me for my Feishu self-built app App ID and App Secret; explain that agentd needs app credentials, not a tenant_access_token or webhook secret.
-- If Feishu credentials are missing, pause setup and tell me exactly where to create or find them:
-  - Create a Feishu "智能体应用" / self-built app at https://open.feishu.cn/app if I do not have one.
-  - In that app's "Credentials & Basic Info" page, copy App ID (`cli_xxx`) and App Secret.
-  - Paste them back into this chat as `AGENTD_FEISHU_APP_ID=cli_xxx` and `AGENTD_FEISHU_APP_SECRET=...`.
-  - After I paste them back, continue setup by writing them to ~/.agentd/agentd.toml or exporting them for this shell, then rerun config-check.
+- When `agentd init --create-feishu-app` prints the Feishu confirmation URL, send it to me and wait while I approve app creation in the browser.
+- Do not print or echo the returned App Secret.
 - Tell me to open https://open.feishu.cn/app/{app_id}/event?tab=callback after replacing `{app_id}` with my app ID, then add the `card.action.trigger` / "卡片回传交互" callback subscription.
 - Confirm the Feishu app has Bot capability, long-connection events `im.message.receive_v1` and `card.action.trigger`, and the permissions documented in README.
-- Keep secrets out of Git by default; use environment variables or tell me exactly where to edit app_id/app_secret.
+- If automatic app creation fails, fall back to manual setup at https://open.feishu.cn/app and ask me to paste `AGENTD_FEISHU_APP_ID=cli_xxx` and `AGENTD_FEISHU_APP_SECRET=...`.
 - Set agentd.source_dir to this repository path and agentd.executable to .venv/bin/agentd.
 - Run config-check and explain any missing values.
 - If systemd --user is available, offer to install and start the service.
@@ -118,30 +127,30 @@ codex --version
 uv run agentd --config ~/.agentd/agentd.toml init
 ```
 
-This creates `~/.agentd/agentd.toml` and a conservative `~/agent-context` skeleton without overwriting existing files. Use flags when you want custom paths:
+This creates `~/.agentd/agentd.toml` and a conservative `~/.agentd/context` skeleton without overwriting existing files. Use flags when you want custom paths:
 
 ```bash
 uv run agentd --config ~/.agentd/agentd.toml init \
   --home-dir ~/.agentd \
-  --context-dir ~/agent-context \
+  --context-dir ~/.agentd/context \
   --source-dir "$(pwd)"
 ```
 
 If you prefer to do the same setup completely by hand:
 
 ```bash
-mkdir -p ~/.agentd ~/agent-context
+mkdir -p ~/.agentd ~/.agentd/context
 cp examples/agentd.example.toml ~/.agentd/agentd.toml
-cp examples/context.example.toml ~/agent-context/context.toml
-cp examples/schedules.example.toml ~/agent-context/schedules.toml
+cp examples/context.example.toml ~/.agentd/context/context.toml
+cp examples/schedules.example.toml ~/.agentd/context/schedules.toml
 ```
 
 Create a minimal context skeleton:
 
 ```bash
-mkdir -p ~/agent-context/memory/projects ~/agent-context/skills
+mkdir -p ~/.agentd/context/memory/projects ~/.agentd/context/skills
 
-cat > ~/agent-context/CONTEXT.md <<'EOF'
+cat > ~/.agentd/context/CONTEXT.md <<'EOF'
 # CONTEXT.md
 
 This is my private agent context repository.
@@ -151,7 +160,7 @@ This is my private agent context repository.
 - Context-local skills live under skills/**/SKILL.md.
 EOF
 
-cat > ~/agent-context/memory/MEMORY.md <<'EOF'
+cat > ~/.agentd/context/memory/MEMORY.md <<'EOF'
 # Memory Index
 
 Search this directory with rg before loading deeper memory files.
@@ -159,7 +168,7 @@ Search this directory with rg before loading deeper memory files.
 - Project notes: memory/projects/
 EOF
 
-cat > ~/agent-context/.gitignore <<'EOF'
+cat > ~/.agentd/context/.gitignore <<'EOF'
 .env
 .venv/
 __pycache__/
@@ -170,7 +179,7 @@ Edit `~/.agentd/agentd.toml`:
 
 - Set `agentd.source_dir` to this cloned repository path.
 - Keep `agentd.executable = ".venv/bin/agentd"` unless you use a different install path.
-- Keep `context.dir = "~/agent-context"` or point it at your own private context repository.
+- Keep `context.dir = "~/.agentd/context"` or point it at your own private context repository.
 
 Required Feishu fields can also be supplied by environment variables:
 
@@ -204,6 +213,7 @@ uv run agentd --config ~/.agentd/agentd.toml service install --enable --now
 Important path defaults:
 
 - `AGENTD_HOME` defaults to `~/.agentd`; the default config path is `~/.agentd/agentd.toml`.
+- `AGENTD_CONTEXT_HOME` defaults to `~/.agentd/context`.
 - `agentd.source_dir` points at the cloned agentd source tree.
 - `agentd.state_dir` stores agentd's own process and registry state, defaults to `AGENTD_HOME/state`, and is relative to `AGENTD_HOME` when not absolute.
 - `agentd.workspace` is where Codex turns run and defaults to `context.dir`.

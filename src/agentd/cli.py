@@ -30,13 +30,26 @@ def main(argv: list[str] | None = None) -> int:
 
     init = sub.add_parser('init', help='initialize local agentd config and context skeleton')
     init.add_argument('--home-dir', default='', help='agentd home directory; defaults to ~/.agentd')
-    init.add_argument('--context-dir', default='', help='user context directory; defaults to ~/agent-context')
+    init.add_argument('--context-dir', default='', help='user context directory; defaults to ~/.agentd/context')
     init.add_argument('--source-dir', default='', help='agentd source tree; defaults to this repository')
     init.add_argument('--executable', default='.venv/bin/agentd', help='agentd executable path relative to source-dir')
     init.add_argument('--runner-kind', default='codex', choices=['codex', 'claude_code'], help='default agent runner')
     init.add_argument('--codex-command', default='codex', help='Codex command to put in agentd.toml')
     init.add_argument('--claude-command', default='aclaude', help='Claude Code command to put in agentd.toml')
     init.add_argument('--claude-model', default='sonnet', help='Claude Code model alias to put in agentd.toml')
+    init.add_argument(
+        '--create-feishu-app',
+        action='store_true',
+        help='create a Feishu PersonalAgent app through browser confirmation and save app_id/app_secret',
+    )
+    init.add_argument('--feishu-brand', choices=['feishu', 'lark'], default='feishu', help='platform brand for app setup')
+    init.add_argument(
+        '--feishu-registration-timeout',
+        type=int,
+        default=300,
+        metavar='SECONDS',
+        help='maximum time to wait for browser app creation confirmation',
+    )
     init.add_argument('--overwrite', action='store_true', help='overwrite existing bootstrap files')
 
     serve = sub.add_parser('serve', help='start Feishu websocket listener')
@@ -157,12 +170,27 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def init_request(args: argparse.Namespace) -> int:
-    from .bootstrap import BootstrapOptions, init_agentd
+    from .bootstrap import BootstrapOptions, init_agentd, write_feishu_credentials
 
     home_dir = Path(args.home_dir).expanduser().resolve() if args.home_dir else default_home_dir()
     context_dir = Path(args.context_dir).expanduser().resolve() if args.context_dir else default_context_dir()
     source_dir = Path(args.source_dir).expanduser().resolve() if args.source_dir else PROJECT_ROOT
     config_path = Path(args.config).expanduser().resolve() if args.config else home_dir / 'agentd.toml'
+    feishu_app_id = ''
+    feishu_app_secret = ''
+
+    if args.create_feishu_app:
+        if config_path.exists() and not args.overwrite and _config_has_feishu_credentials(config_path):
+            print(
+                'existing Feishu credentials are already present; pass --overwrite to replace them',
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            feishu_app_id, feishu_app_secret = create_feishu_app(args)
+        except Exception as exc:
+            print(f'failed to create Feishu app: {exc}', file=sys.stderr)
+            return 2
 
     result = init_agentd(
         BootstrapOptions(
@@ -175,18 +203,73 @@ def init_request(args: argparse.Namespace) -> int:
             codex_command=str(args.codex_command or 'codex'),
             claude_command=str(args.claude_command or 'aclaude'),
             claude_model=str(args.claude_model or 'sonnet'),
+            feishu_app_id=feishu_app_id,
+            feishu_app_secret=feishu_app_secret,
             overwrite=bool(args.overwrite),
         )
     )
+    if args.create_feishu_app and config_path not in result.created:
+        updated = write_feishu_credentials(
+            config_path,
+            app_id=feishu_app_id,
+            app_secret=feishu_app_secret,
+            overwrite=bool(args.overwrite),
+        )
+        if updated:
+            print(f'updated Feishu credentials in {config_path}')
+        else:
+            print(
+                'created Feishu app but did not overwrite existing credentials; '
+                'pass --overwrite to replace them',
+                file=sys.stderr,
+            )
+            return 2
     print(f'config_path={config_path}')
     print(f'context_dir={context_dir}')
     for path in result.created:
         print(f'created {path}')
     for path in result.skipped:
         print(f'skipped existing {path}')
-    print('next: fill Feishu credentials or export AGENTD_FEISHU_APP_ID/AGENTD_FEISHU_APP_SECRET')
+    if args.create_feishu_app:
+        print('created Feishu app and saved credentials')
+        open_base = 'https://open.larksuite.com' if args.feishu_brand == 'lark' else 'https://open.feishu.cn'
+        print(f'next: open {open_base}/app/{feishu_app_id}/event?tab=callback')
+        print('next: subscribe im.message.receive_v1 and card.action.trigger, then publish the app version')
+    else:
+        print('next: fill Feishu credentials or export AGENTD_FEISHU_APP_ID/AGENTD_FEISHU_APP_SECRET')
     print(f'next: uv run agentd --config {config_path} config-check')
     return 0
+
+
+def create_feishu_app(args: argparse.Namespace) -> tuple[str, str]:
+    from .feishu_registration import FeishuAppRegistrationClient
+
+    client = FeishuAppRegistrationClient(
+        brand=str(args.feishu_brand or 'feishu'),
+        timeout_seconds=int(args.feishu_registration_timeout or 300),
+    )
+    begin = client.begin()
+    print('Open this URL to create the Feishu agent app:')
+    print(begin.verification_url)
+    print('Waiting for browser confirmation...')
+    result = client.poll(begin)
+    print(f'Feishu app created: app_id={result.app_id}')
+    return result.app_id, result.app_secret
+
+
+def _config_has_feishu_credentials(path: Path) -> bool:
+    try:
+        import tomllib
+    except ModuleNotFoundError:  # pragma: no cover - Python 3.10 fallback
+        import tomli as tomllib
+
+    try:
+        with path.open('rb') as fh:
+            raw = tomllib.load(fh)
+    except Exception:
+        return True
+    feishu = raw.get('feishu') if isinstance(raw.get('feishu'), dict) else {}
+    return bool(feishu.get('app_id') or feishu.get('app_secret'))
 
 
 def configure_logging(level: str) -> None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -15,6 +16,8 @@ class BootstrapOptions:
     codex_command: str = 'codex'
     claude_command: str = 'aclaude'
     claude_model: str = 'sonnet'
+    feishu_app_id: str = ''
+    feishu_app_secret: str = ''
     overwrite: bool = False
 
 
@@ -37,6 +40,8 @@ def init_agentd(options: BootstrapOptions) -> BootstrapResult:
         overwrite=options.overwrite,
         result=result,
     )
+    if options.config_path in result.created:
+        options.config_path.chmod(0o600)
     write_file(
         options.context_dir / 'context.toml',
         context_toml(),
@@ -109,8 +114,8 @@ schedules = "schedules.toml"
 [feishu]
 # app_id and app_secret can also be supplied by environment:
 # AGENTD_FEISHU_APP_ID, AGENTD_FEISHU_APP_SECRET
-app_id = ""
-app_secret = ""
+app_id = {_toml_string(options.feishu_app_id)}
+app_secret = {_toml_string(options.feishu_app_secret)}
 ignore_bot_messages = true
 main_reply_in_thread = false
 child_reply_in_thread = true
@@ -138,6 +143,79 @@ model = "{options.claude_model}"
 permission_mode = "bypassPermissions"
 use_login_shell = true
 """
+
+
+def write_feishu_credentials(
+    config_path: Path,
+    *,
+    app_id: str,
+    app_secret: str,
+    overwrite: bool = False,
+) -> list[str]:
+    if not app_id or not app_secret:
+        return []
+    text = config_path.read_text(encoding='utf-8') if config_path.exists() else ''
+    lines = text.splitlines()
+    updated: list[str] = []
+    seen_feishu = False
+    in_feishu = False
+    found_app_id = False
+    found_app_secret = False
+    insert_at = len(lines)
+    out: list[str] = []
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith('[') and stripped.endswith(']'):
+            if in_feishu and insert_at == len(lines):
+                insert_at = len(out)
+            in_feishu = stripped == '[feishu]'
+            seen_feishu = seen_feishu or in_feishu
+        if in_feishu and stripped.startswith('app_id') and '=' in stripped:
+            found_app_id = True
+            line, changed = _credential_line(line, 'app_id', app_id, overwrite=overwrite)
+            if changed:
+                updated.append('app_id')
+        elif in_feishu and stripped.startswith('app_secret') and '=' in stripped:
+            found_app_secret = True
+            line, changed = _credential_line(line, 'app_secret', app_secret, overwrite=overwrite)
+            if changed:
+                updated.append('app_secret')
+        out.append(line)
+
+    if seen_feishu:
+        additions: list[str] = []
+        if not found_app_id:
+            additions.append(f'app_id = {_toml_string(app_id)}')
+            updated.append('app_id')
+        if not found_app_secret:
+            additions.append(f'app_secret = {_toml_string(app_secret)}')
+            updated.append('app_secret')
+        if additions:
+            out[insert_at:insert_at] = additions
+    else:
+        if out and out[-1].strip():
+            out.append('')
+        out.extend(['[feishu]', f'app_id = {_toml_string(app_id)}', f'app_secret = {_toml_string(app_secret)}'])
+        updated.extend(['app_id', 'app_secret'])
+
+    if updated:
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text('\n'.join(out).rstrip() + '\n', encoding='utf-8')
+        config_path.chmod(0o600)
+    return updated
+
+
+def _credential_line(line: str, key: str, value: str, *, overwrite: bool) -> tuple[str, bool]:
+    prefix, current = line.split('=', 1)
+    current = current.strip()
+    if current not in {'""', "''"} and not overwrite:
+        return line, False
+    return f'{prefix.rstrip()} = {_toml_string(value)}', True
+
+
+def _toml_string(value: object) -> str:
+    return json.dumps(str(value), ensure_ascii=False)
 
 
 def context_toml() -> str:
