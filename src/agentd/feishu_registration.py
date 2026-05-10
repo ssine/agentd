@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
@@ -134,18 +135,24 @@ class FeishuAppRegistrationClient:
             method='POST',
             headers={'Content-Type': 'application/x-www-form-urlencoded'},
         )
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            raw = resp.read().decode('utf-8', errors='replace')
-            status = resp.status
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                raw = resp.read().decode('utf-8', errors='replace')
+                status = resp.status
+        except urllib.error.HTTPError as exc:
+            raw = exc.read().decode('utf-8', errors='replace')
+            status = exc.code
         try:
             data = json.loads(raw)
         except json.JSONDecodeError as exc:
             raise FeishuAppRegistrationError(f'app registration returned non-JSON response: HTTP {status}') from exc
+        if not isinstance(data, dict):
+            raise FeishuAppRegistrationError('app registration returned invalid JSON response')
+        if form.get('action') == 'poll' and _str(data, 'error'):
+            return data
         if status >= 400 or data.get('error'):
             description = _str(data, 'error_description') or _str(data, 'error') or f'HTTP {status}'
             raise FeishuAppRegistrationError(f'app registration failed: {description}')
-        if not isinstance(data, dict):
-            raise FeishuAppRegistrationError('app registration returned invalid JSON response')
         return data
 
 
