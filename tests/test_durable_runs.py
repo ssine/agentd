@@ -504,7 +504,7 @@ class DurableRunProjectionTest(unittest.TestCase):
             launch.assert_not_called()
             self.assertIsNotNone(read_deferred_service_command(config))
 
-    def test_spawned_child_uses_thread_intro_message_as_status_card(self) -> None:
+    def test_spawned_child_handoff_reuses_parent_status_card(self) -> None:
         with tempfile.TemporaryDirectory() as raw_dir:
             root = Path(raw_dir)
             daemon = AgentDaemon(make_config(root), dry_send=True)
@@ -553,12 +553,12 @@ class DurableRunProjectionTest(unittest.TestCase):
             child_sessions = [session for session in daemon.registry.list_sessions() if session.kind == 'child']
             self.assertEqual(len(child_sessions), 1)
             child_session = child_sessions[0]
-            self.assertEqual(child_session.root_message_id, 'dry-thread-message-1')
+            self.assertEqual(child_session.root_message_id, 'parent-card')
             child_runs = daemon.registry.list_runs(session_id=child_session.id)
             self.assertEqual(len(child_runs), 1)
             child_run = child_runs[0]
-            self.assertEqual(child_run.source_message_id, 'dry-thread-message-1')
-            self.assertEqual(child_run.status_message_id, 'dry-thread-message-1')
+            self.assertEqual(child_run.source_message_id, 'parent-card')
+            self.assertEqual(child_run.status_message_id, 'parent-card')
 
     def test_spawn_branch_keeps_parent_running(self) -> None:
         with tempfile.TemporaryDirectory() as raw_dir:

@@ -40,11 +40,12 @@ class SpawnCoordinator:
         sender_open_id = request.sender_open_id or parent_run.sender_open_id
         try:
             thread_id, source_message_id = self.create_child_thread(parent_run, request, mode=mode)
+            root_message_id = parent_run.status_message_id if mode == 'handoff' else source_message_id
             child_session = owner.registry.bind_child_session(
                 request.chat_id,
                 thread_id,
                 request.cwd,
-                root_message_id=source_message_id,
+                root_message_id=root_message_id,
                 parent_id=parent.session.id,
                 context_profile=request.context_profile or owner.config.context.default_child_profile,
                 skills=request.skills,
@@ -58,7 +59,7 @@ class SpawnCoordinator:
 
             if mode == 'handoff':
                 parent.handoff_child_session_id = child_session.id
-                owner.registry.update_run_and_mark_card_dirty(
+                owner.registry.update_run(
                     parent.run_id,
                     handoff_child_session_id=child_session.id,
                     state='interrupted',
@@ -67,7 +68,6 @@ class SpawnCoordinator:
                     finished_at=int(time.time()),
                 )
                 owner._add_model_message(parent, f'已移交子任务：{request.title or request.cwd}', phase='control')
-                owner._publish_status(parent, force=True, create=True)
                 parent.control.interrupt()
                 parent.done.set()
                 with owner._active_lock:
@@ -79,11 +79,11 @@ class SpawnCoordinator:
 
             child_run = owner.registry.create_run(
                 session_id=child_session.id,
-                source_message_id=source_message_id,
+                source_message_id=root_message_id,
                 prompt=owner._build_child_prompt(request, child_session, source_message_id),
                 host=owner.host,
                 status='启动子任务',
-                status_message_id=source_message_id,
+                status_message_id=root_message_id,
                 subject='子任务',
                 display_title=normalize_title(request.title or title_from_text(request.prompt, fallback='子任务')),
                 runner_kind=owner.runner.kind,

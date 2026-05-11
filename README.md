@@ -314,7 +314,7 @@ prompt_file_max_bytes = 65536
 
 Agentd has two child-thread creation modes:
 
-- `spawn-child`: hand off the current task. The parent turn is interrupted and the child thread takes over.
+- `spawn-child`: hand off the current task. The parent turn is interrupted, the child thread takes over, and the child status reuses the parent status card.
 - `spawn-branch`: start parallel work. The parent turn keeps running, and agentd posts a new top-level status card in the main Feishu chat for the branch. The branch thread is attached to that new card, not to the parent task card.
 
 Child sessions cannot create nested child threads because Feishu threads do not support child threads. Start separate work from the main chat instead.
